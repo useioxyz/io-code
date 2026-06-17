@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+*.js
+*.js.map
+*.d.ts
+*.d.ts.map
+!bin/iocode.ts    # keep source ts
+
+# Environment — NEVER commit .env files
+.env
+.env.*
+*.env
+!.env.example
+
+# IO Code config (contains API keys)
+.iorc.yaml
+.iorc.yml
+.iorc.json
+
+# Runtime data (but track shared agents/skills)
+.io_history
+.io_sessions/
+.iocode/sessions/
+.iocode/handoffs/
+
+# Credentials
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+secrets*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

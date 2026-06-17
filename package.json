@@ -1,0 +1,33 @@
+{
+  "name": "iocode",
+  "version": "0.1.0",
+  "description": "IO Code — private AI coding agent for the terminal",
+  "type": "module",
+  "bin": {
+    "io": "./bin/iocode.js"
+  },
+  "main": "./bin/iocode.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node bin/iocode.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "glob": "^11.0.2",
+    "ora": "^8.2.0",
+    "yaml": "^2.7.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["ai", "coding-agent", "cli", "io", "privacy", "byok"],
+  "license": "Apache-2.0",
+  "repository": "https://github.com/useioxyz/io-code"
+}
