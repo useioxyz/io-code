@@ -232,23 +232,28 @@ program
       model: options.model,
     });
 
-    if (!config.provider) {
-      console.error(R("No provider configured. Set IO_PROVIDER env var or use --provider."));
-      console.error(D("Available: anthropic, openai, deepseek, groq, openrouter, codex, opencode, custom"));
+    // One-shot mode requires a working provider+key
+    if (prompt && !config.provider) {
+      console.error(R("No provider configured for one-shot mode. Use IO_PROVIDER or --provider."));
+      console.error(D("Or run 'io' without a prompt to enter interactive setup."));
       process.exit(1);
     }
 
-    const apiKey = options.key ?? getApiKey(config, config.provider);
-    // Codex & OpenCode use OAuth/CLI auth — no API key required
-    if (!apiKey && config.provider !== "codex" && config.provider !== "opencode") {
-      console.error(R(`No API key for ${config.provider}. Set ${PROVIDER_REGISTRY[config.provider]?.keyEnv} env var or use --key.`));
-      process.exit(1);
+    if (prompt && config.provider) {
+      const apiKey = options.key ?? getApiKey(config, config.provider);
+      if (!apiKey && config.provider !== "codex" && config.provider !== "opencode") {
+        console.error(R(`No API key for ${config.provider}. Use --key or run 'io' for interactive setup.`));
+        process.exit(1);
+      }
     }
 
+    // Resolve providerConfig (may be partial for REPL setup mode)
+    const provider: ProviderId = config.provider ?? "deepseek";
+    const apiKey = options.key ?? getApiKey(config, provider) ?? "";
     const providerConfig: ProviderConfig = {
-      provider: config.provider,
-      model: config.model ?? PROVIDER_REGISTRY[config.provider]?.defaultModel ?? "unknown",
-      apiKey,
+      provider,
+      model: config.model ?? PROVIDER_REGISTRY[provider]?.defaultModel ?? "unknown",
+      apiKey: apiKey || undefined,
       baseUrl: config.baseUrl,
       temperature: parseFloat(options.temperature),
     };
@@ -415,6 +420,16 @@ async function runRepl(
     console.log(D(`  agents: ${agents.map(a => `@${a.name}`).join(", ")}`));
   }
 
+  // Setup hint: no API key yet
+  if (!providerConfig.apiKey && providerConfig.provider !== "codex" && providerConfig.provider !== "opencode") {
+    console.log(Y(`\n  ⚡ No API key configured. Set it up now:`));
+    console.log(D(`  /provider <name>   — switch provider (deepseek, anthropic, openai, ...)`));
+    console.log(D(`  /key <your-key>    — set API key`));
+    console.log(D(`  /model <name>      — switch model`));
+    console.log(D(`  /help              — all commands`));
+    console.log("");
+  }
+
   if (resumeSession) {
     console.log(G(`  ↻ Resumed session: ${resumeSession} (${state.conversation.length} messages, ${state.todos.filter(t => !t.done).length} open todos)`));
   }
@@ -564,6 +579,14 @@ async function processInput(
   rl: readline.Interface,
 ): Promise<void> {
   if (!state.providerConfig) return;
+
+  // Check if API key is configured (skip for OAuth-based providers)
+  if (!state.providerConfig.apiKey && state.providerConfig.provider !== "codex" && state.providerConfig.provider !== "opencode") {
+    console.log(Y(`  ⚠️  No API key set. Use /key <your-key> or /provider to switch.`));
+    console.log(D(`  Providers: anthropic, openai, deepseek, groq, openrouter, codex, opencode, custom`));
+    console.log(D(`  Current: ${state.providerConfig.provider}  ·  ${state.providerConfig.model}`));
+    return;
+  }
 
   // Auto-compaction warning
   const msgCount = state.conversation.length;
@@ -806,10 +829,6 @@ async function handleCommand(
       if (!match) return R(`Unknown provider: ${arg}. Use /provider to list.`);
 
       const apiKey = getApiKey(state.config, match);
-      // Codex & OpenCode use OAuth/CLI auth — skip key check
-      if (!apiKey && match !== "codex" && match !== "opencode") {
-        return R(`No API key for ${match}. Set ${PROVIDER_REGISTRY[match]?.keyEnv} or use /key.`);
-      }
 
       state.providerConfig = {
         provider: match,
@@ -1577,35 +1596,25 @@ if (process.argv.length <= 2) {
   const projectRoot = process.cwd();
   const config = loadConfig(projectRoot);
 
+  let pc: ProviderConfig;
+
   if (!config.provider) {
-    console.error(R("No provider configured."));
-    console.error(D("\nQuick start:"));
-    console.error(D("  export DEEPSEEK_API_KEY=sk-..."));
-    console.error(D("  export ANTHROPIC_API_KEY=sk-ant-..."));
-    console.error(D("  export OPENAI_API_KEY=sk-..."));
-    console.error(D("  export GROQ_API_KEY=gsk_..."));
-    console.error(D("  export OPENAI_CODEX_AUTH_TOKEN=***"));
-    console.error(D("  # or: codex login    opencode (go install)"));
-    console.error(D("\nOr create ~/.iorc.yaml:"));
-    console.error(D("  provider: deepseek"));
-    console.error(D("  keys:"));
-    console.error(D("    deepseek: sk-..."));
-    process.exit(1);
+    // No provider yet — still enter REPL, let user configure from inside
+    pc = {
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      apiKey: undefined,
+    };
+  } else {
+    const apiKey = getApiKey(config, config.provider);
+    pc = {
+      provider: config.provider,
+      model: config.model ?? PROVIDER_REGISTRY[config.provider]?.defaultModel ?? "unknown",
+      apiKey: apiKey ?? undefined,
+      baseUrl: config.baseUrl,
+      temperature: config.temperature,
+    };
   }
-
-  const apiKey = getApiKey(config, config.provider);
-  if (!apiKey) {
-    console.error(R(`No API key for ${config.provider}.`));
-    process.exit(1);
-  }
-
-  const pc: ProviderConfig = {
-    provider: config.provider,
-    model: config.model ?? PROVIDER_REGISTRY[config.provider]?.defaultModel ?? "unknown",
-    apiKey,
-    baseUrl: config.baseUrl,
-    temperature: config.temperature,
-  };
 
   runRepl(pc, projectRoot, config).catch(e => {
     console.error(R(`\n  Fatal: ${e.message}`));

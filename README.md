@@ -33,14 +33,20 @@ npm install
 npm run build
 npm link
 
-# Set up BYOK
-export DEEPSEEK_API_KEY=sk-...    # or ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY
-export IO_PROVIDER=deepseek       # default provider
+# Run — even without any config, you can set up from the CLI
+io                                    # interactive REPL (no setup needed!)
+io> /provider deepseek                # switch to deepseek
+io> /key sk-...                       # set API key (saved to ~/.iorc.yaml)
+io> build a CLI tool in TypeScript    # start coding!
 
-# Run
-io                                  # interactive REPL
-io "Fix the auth bug"               # one-shot
-io -p anthropic -m claude-opus-4-8 "Refactor"  # custom provider/model
+# Or set up via env vars
+export DEEPSEEK_API_KEY=sk-...
+export IO_PROVIDER=deepseek
+io                                    # ready to go
+
+# One-shot mode (requires provider+key)
+io "Fix the auth bug"
+io -p anthropic -m claude-opus-4-8 "Refactor"
 ```
 
 ## Providers
