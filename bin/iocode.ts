@@ -54,17 +54,17 @@ function showBanner(): string {
     ].join("\n");
   }
 
-  // Full banner
+  // Full banner — flush left, no indent
   return [
     ``,
-    `       ${I("██╗ ██████╗")}      ${W("██████╗  ██████╗  ██████╗  ███████╗")}`,
-    `       ${I("██║██╔═══██╗")}    ${W("██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝")}`,
-    `       ${I("██║██║   ██║")}    ${W("██║      ██║   ██║ ██║  ██║ █████╗  ")}`,
-    `       ${I("██║██║   ██║")}    ${W("██║      ██║   ██║ ██║  ██║ ██╔══╝  ")}`,
-    `       ${I("██║╚██████╔╝")}    ${W("╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗")}`,
-    `       ${I("╚═╝ ╚═════╝")}      ${W("╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝")}`,
+    `${I("██╗ ██████╗")}      ${W("██████╗  ██████╗  ██████╗  ███████╗")}`,
+    `${I("██║██╔═══██╗")}    ${W("██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝")}`,
+    `${I("██║██║   ██║")}    ${W("██║      ██║   ██║ ██║  ██║ █████╗  ")}`,
+    `${I("██║██║   ██║")}    ${W("██║      ██║   ██║ ██║  ██║ ██╔══╝  ")}`,
+    `${I("██║╚██████╔╝")}    ${W("╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗")}`,
+    `${I("╚═╝ ╚═════╝")}      ${W("╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝")}`,
     ``,
-    `       ${D(`private coding agent  ·  BYOK  ·  v${VERSION}  ·  I/O Protocol`)}`,
+    `${D(`private coding agent  ·  BYOK  ·  v${VERSION}  ·  I/O Protocol`)}`,
     ``,
   ].join("\n");
 }
@@ -466,7 +466,7 @@ async function runRepl(
     input: process.stdin,
     output: process.stdout,
     prompt: state.planMode ? M("  📋 ❯ ") : C("  ❯ "),
-    terminal: true,
+    terminal: false, // raw mode off — avoids double-echo when running via Discord/Terminal proxy
     history,
     historySize: 500,
     removeHistoryDuplicates: true,
