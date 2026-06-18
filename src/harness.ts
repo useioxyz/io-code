@@ -40,6 +40,7 @@ export interface HarnessEvent {
   toolTitle?: string;
   toolOutput?: string;
   toolOk?: boolean;
+  fileChange?: { path: string; action: "created" | "modified" | "deleted" };
   steps?: number;
   filesChanged?: number;
   totalInputTokens?: number;
@@ -370,6 +371,7 @@ export async function* runAgent(
         toolName: exec.tc.name,
         toolOk: outcome.ok,
         toolOutput: outcome.output,
+        fileChange: outcome.fileChange,
       };
 
       if (outcome.fileChange) {

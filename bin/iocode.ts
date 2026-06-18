@@ -94,6 +94,14 @@ interface SessionState {
   pendingReview?: string;
   agents: AgentDef[];
   sessionName?: string;
+  /** File change journal — powers /undo */
+  fileJournal: FileChangeEntry[];
+}
+
+interface FileChangeEntry {
+  timestamp: number;
+  path: string;
+  action: "created" | "modified" | "deleted";
 }
 
 const SESSIONS_DIR = path.join(os.homedir(), ".io_sessions");
@@ -337,6 +345,7 @@ async function runRepl(
     todos: [],
     planMode: false,
     agents,
+    fileJournal: [],
   };
 
   // Resume session if requested
@@ -355,6 +364,40 @@ async function runRepl(
 
   // Startup info line
   console.log(D(`  ${providerConfig.provider}  ·  ${providerConfig.model}  ·  ${projectRoot}`));
+
+  // Git branch + status
+  try {
+    const { execSync } = await import("node:child_process");
+    const branch = execSync("git branch --show-current", {
+      cwd: projectRoot, timeout: 3000, encoding: "utf-8",
+    }).trim();
+    if (branch) {
+      const status = execSync("git status --porcelain", {
+        cwd: projectRoot, timeout: 3000, encoding: "utf-8",
+      });
+      const dirtyCount = status.split("\n").filter(Boolean).length;
+      const ahead = (() => {
+        try {
+          return execSync(`git rev-list --count ${branch}..@{u} 2>/dev/null`, {
+            cwd: projectRoot, timeout: 3000, encoding: "utf-8",
+          }).trim();
+        } catch { return null; }
+      })();
+      const behind = (() => {
+        try {
+          return execSync(`git rev-list --count @{u}..${branch} 2>/dev/null`, {
+            cwd: projectRoot, timeout: 3000, encoding: "utf-8",
+          }).trim();
+        } catch { return null; }
+      })();
+
+      let statusLine = `  ${G("\u2387")} ${branch}`;
+      if (dirtyCount > 0) statusLine += Y(`  ${dirtyCount} dirty`);
+      if (ahead && parseInt(ahead) > 0) statusLine += D(`  ↑${ahead}`);
+      if (behind && parseInt(behind) > 0) statusLine += D(`  ↓${behind}`);
+      console.log(statusLine);
+    }
+  } catch {}
 
   if (contextFiles.length > 0) {
     console.log(D(`  Context: ${contextFiles.map(f => f.name).join(", ")}`));
@@ -611,6 +654,15 @@ async function processInput(
           const icon = ev.toolOk ? G("✓") : R("✗");
           const outLine = (ev.toolOutput ?? "").split("\n")[0].slice(0, 120);
           console.log(`${D("┆")} ${icon} ${D(outLine)}`);
+
+          // Record file change for /undo (git-based revert)
+          if (ev.fileChange) {
+            state.fileJournal.push({
+              timestamp: Date.now(),
+              path: ev.fileChange.path,
+              action: ev.fileChange.action,
+            });
+          }
           break;
 
         case "done":
@@ -676,7 +728,7 @@ async function handleCommand(
         ``,
         `  ${B("▸ Session")}     /model /provider /config /key /temp /clear /session /sessions /handoff /export`,
         `  ${B("▸ Context")}    /project /reload /compact /tokens /cost /init`,
-        `  ${B("▸ Code")}       /review /plan /todos /agents`,
+        `  ${B("▸ Code")}       /review /plan /todos /agents /lint /undo`,
         `  ${B("▸ Files")}      /find /workspace /clone`,
         `  ${B("▸ Git")}        /diff /status /log /commit`,
         `  ${B("▸ Shell")}      ! cmd   !! cmd  (bang commands)`,
@@ -1319,6 +1371,134 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
         spinner.stop();
         return R(`  Clone failed: ${e.message}`);
       }
+    }
+
+    // ═══ Undo ═══
+    case "/undo": {
+      if (state.fileJournal.length === 0) return D("  Nothing to undo. File changes are tracked per session.");
+
+      const count = Math.min(parseInt(arg) || 1, state.fileJournal.length);
+      const toUndo = state.fileJournal.splice(-count, count).reverse();
+
+      const lines: string[] = [];
+      let undid = 0;
+
+      for (const entry of toUndo) {
+        const absPath = path.resolve(state.projectRoot, entry.path);
+        try {
+          if (entry.action === "created") {
+            fs.unlinkSync(absPath);
+            lines.push(G(`  ✓ Removed ${entry.path}`));
+            undid++;
+          } else {
+            // Modified or deleted — git checkout to restore
+            const { execSync } = await import("node:child_process");
+            execSync(`git checkout -- "${entry.path}"`, {
+              cwd: state.projectRoot, timeout: 5000, encoding: "utf-8",
+            });
+            lines.push(G(`  ✓ Reverted ${entry.path}`));
+            undid++;
+          }
+        } catch (e: any) {
+          lines.push(R(`  ✗ ${entry.path}: ${e.stderr ?? e.message}`));
+        }
+      }
+
+      if (undid > 0) lines.unshift(G(`  ↩ Undid ${undid} file change${undid > 1 ? "s" : ""}:`));
+      return lines.join("\n");
+    }
+
+    // ═══ Lint ═══
+    case "/lint": {
+      const autoFix = arg === "--fix";
+      const { execSync } = await import("node:child_process");
+
+      // Auto-detect linter
+      const hasBiome = fs.existsSync(path.join(state.projectRoot, "biome.json"))
+        || fs.existsSync(path.join(state.projectRoot, "biome.jsonc"));
+      const hasESLint = fs.existsSync(path.join(state.projectRoot, "eslint.config.js"))
+        || fs.existsSync(path.join(state.projectRoot, "eslint.config.mjs"))
+        || fs.existsSync(path.join(state.projectRoot, "eslint.config.ts"))
+        || fs.existsSync(path.join(state.projectRoot, ".eslintrc.js"))
+        || fs.existsSync(path.join(state.projectRoot, ".eslintrc.json"))
+        || fs.existsSync(path.join(state.projectRoot, ".eslintrc.yaml"));
+      const hasPrettier = fs.existsSync(path.join(state.projectRoot, ".prettierrc"))
+        || fs.existsSync(path.join(state.projectRoot, ".prettierrc.json"))
+        || fs.existsSync(path.join(state.projectRoot, ".prettierrc.yaml"))
+        || fs.existsSync(path.join(state.projectRoot, "prettier.config.js"))
+        || fs.existsSync(path.join(state.projectRoot, "prettier.config.mjs"));
+      const hasRuff = fs.existsSync(path.join(state.projectRoot, "pyproject.toml"))
+        || fs.existsSync(path.join(state.projectRoot, "ruff.toml"));
+      const hasOxlint = fs.existsSync(path.join(state.projectRoot, ".oxlintrc.json"))
+        || fs.existsSync(path.join(state.projectRoot, "oxlintrc.json"));
+
+      const spinner = ora(D("Linting...")).start();
+      const results: string[] = [];
+
+      // Run all detected linters
+      try {
+        if (hasBiome) {
+          const cmd = autoFix ? "npx biome check --write ." : "npx biome check .";
+          try {
+            execSync(cmd, { cwd: state.projectRoot, timeout: 60_000, encoding: "utf-8", stdio: "pipe" });
+            results.push(G("  ✓ Biome"));
+          } catch (e: any) {
+            results.push(Y(`  ⚠️  Biome: issues found${autoFix ? " (auto-fixed some)" : ""}\n${(e.stdout ?? "").slice(0, 500)}`));
+          }
+        }
+
+        if (hasESLint) {
+          const cmd = autoFix ? "npx eslint . --fix" : "npx eslint .";
+          try {
+            const out = execSync(cmd, { cwd: state.projectRoot, timeout: 60_000, encoding: "utf-8", stdio: "pipe" });
+            results.push(G("  ✓ ESLint"));
+          } catch (e: any) {
+            const output = (e.stdout ?? "") + (e.stderr ?? "");
+            results.push(Y(`  ⚠️  ESLint:${output.slice(0, 800)}`));
+          }
+        }
+
+        if (hasPrettier) {
+          const cmd = autoFix ? "npx prettier --write ." : "npx prettier --check .";
+          try {
+            execSync(cmd, { cwd: state.projectRoot, timeout: 60_000, encoding: "utf-8", stdio: "pipe" });
+            results.push(G("  ✓ Prettier"));
+          } catch (e: any) {
+            results.push(Y(`  ⚠️  Prettier:${(e.stderr ?? e.stdout ?? "").slice(0, 500)}`));
+          }
+        }
+
+        if (hasRuff) {
+          const cmd = autoFix ? "ruff check --fix ." : "ruff check .";
+          try {
+            execSync(cmd, { cwd: state.projectRoot, timeout: 60_000, encoding: "utf-8", stdio: "pipe" });
+            results.push(G("  ✓ Ruff"));
+          } catch (e: any) {
+            results.push(Y(`  ⚠️  Ruff:${(e.stdout ?? "").slice(0, 500)}`));
+          }
+        }
+
+        if (hasOxlint) {
+          const cmd = autoFix ? "npx oxlint --fix ." : "npx oxlint .";
+          try {
+            execSync(cmd, { cwd: state.projectRoot, timeout: 60_000, encoding: "utf-8", stdio: "pipe" });
+            results.push(G("  ✓ Oxlint"));
+          } catch (e: any) {
+            results.push(Y(`  ⚠️  Oxlint:${(e.stdout ?? "").slice(0, 500)}`));
+          }
+        }
+
+        if (results.length === 0) {
+          results.push(D("  No linters detected. Add ESLint/Prettier/Biome/Ruff config to project."));
+          results.push(D("  Quick start: npx eslint --init  |  npx @biomejs/biome init  |  pip install ruff && ruff init"));
+        }
+      } catch (e: any) {
+        results.push(R(`  Lint failed: ${e.message}`));
+      } finally {
+        spinner.stop();
+      }
+
+      return `\n${C("Lint Results")}${autoFix ? Y(" --fix") : ""}\n\n${results.join("\n")}`;
     }
 
     // ═══ Quit ═══

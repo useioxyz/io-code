@@ -13,9 +13,12 @@
 ## Features
 
 - **Real filesystem tools** — read, write, edit, delete, search, git operations
-- **Multi-provider BYOK** — Anthropic, OpenAI, DeepSeek, Groq, OpenRouter, custom
+- **Multi-provider BYOK** — Anthropic, OpenAI, DeepSeek, Groq, OpenRouter, Codex (OAuth), OpenCode, custom
+- **Parallel tool execution** — dependency graph + concurrent tool calls + automatic retry
+- **Smart linting** — auto-detect and run ESLint, Biome, Prettier, Ruff, Oxlint
+- **Undo support** — git-based per-file revert with `/undo [n]`
 - **Autonomous agent loop** — plan → act → observe → verify
-- **Slash commands** — /model, /provider, /compact, /clear, /config, /diff, /status, /commit
+- **Slash commands** — /model, /provider, /compact, /clear, /config, /diff, /status, /commit, /lint, /undo, /clone
 - **Context auto-loading** — AGENTS.md, CLAUDE.md, .cursorrules, IODE.md
 - **Project intelligence** — auto-detects framework, package manager, test runner
 - **Compact prompt mode** — save tokens on simple tasks
@@ -70,6 +73,8 @@ io -p anthropic -m claude-opus-4-8 "Refactor"  # custom provider/model
 | `/log [n]` | Git log |
 | `/find <pattern>` | Find files by glob |
 | `/clone <url>` | Clone website locally (HTML+CSS+JS+assets) |
+| `/lint [--fix]` | Run linters (auto-detect: ESLint, Biome, Prettier, Ruff, Oxlint) |
+| `/undo [n]` | Undo last N file changes (git-based revert) |
 | `/workspace` | List workspace files |
 | `/reload` | Reload context files |
 | `/quit` | Exit |
