@@ -16,7 +16,7 @@ import {
   estimateTokens,
   estimateCost,
 } from "../src/harness.js";
-import { TOOL_DEFS } from "../src/tools.js";
+import { TOOL_DEFS, executeTool } from "../src/tools.js";
 import { buildSystemPrompt, buildCompactPrompt } from "../src/prompts.js";
 import { loadContextFiles, scanWorkspace, detectProject } from "../src/context.js";
 import {
@@ -208,7 +208,7 @@ program
   .description("IO Code — private AI coding agent")
   .version(VERSION)
   .argument("[prompt]", "One-shot prompt (omit for interactive REPL)")
-  .option("-p, --provider <provider>", "Provider: anthropic, openai, deepseek, groq, openrouter")
+  .option("-p, --provider <provider>", "Provider: anthropic, openai, deepseek, groq, openrouter, codex, opencode, custom")
   .option("-m, --model <model>", "Model name")
   .option("-k, --key <key>", "API key")
   .option("-d, --dir <dir>", "Project directory", process.cwd())
@@ -226,12 +226,13 @@ program
 
     if (!config.provider) {
       console.error(R("No provider configured. Set IO_PROVIDER env var or use --provider."));
-      console.error(D("Available: anthropic, openai, deepseek, groq, openrouter"));
+      console.error(D("Available: anthropic, openai, deepseek, groq, openrouter, codex, opencode, custom"));
       process.exit(1);
     }
 
     const apiKey = options.key ?? getApiKey(config, config.provider);
-    if (!apiKey) {
+    // Codex & OpenCode use OAuth/CLI auth — no API key required
+    if (!apiKey && config.provider !== "codex" && config.provider !== "opencode") {
       console.error(R(`No API key for ${config.provider}. Set ${PROVIDER_REGISTRY[config.provider]?.keyEnv} env var or use --key.`));
       process.exit(1);
     }
@@ -676,7 +677,7 @@ async function handleCommand(
         `  ${B("▸ Session")}     /model /provider /config /key /temp /clear /session /sessions /handoff /export`,
         `  ${B("▸ Context")}    /project /reload /compact /tokens /cost /init`,
         `  ${B("▸ Code")}       /review /plan /todos /agents`,
-        `  ${B("▸ Files")}      /find /workspace`,
+        `  ${B("▸ Files")}      /find /workspace /clone`,
         `  ${B("▸ Git")}        /diff /status /log /commit`,
         `  ${B("▸ Shell")}      ! cmd   !! cmd  (bang commands)`,
         `  ${B("▸ Meta")}       /help /quit`,
@@ -753,7 +754,8 @@ async function handleCommand(
       if (!match) return R(`Unknown provider: ${arg}. Use /provider to list.`);
 
       const apiKey = getApiKey(state.config, match);
-      if (!apiKey) {
+      // Codex & OpenCode use OAuth/CLI auth — skip key check
+      if (!apiKey && match !== "codex" && match !== "opencode") {
         return R(`No API key for ${match}. Set ${PROVIDER_REGISTRY[match]?.keyEnv} or use /key.`);
       }
 
@@ -1298,6 +1300,27 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
       return `\n${D(state.workspaceFiles.map(f => `  ${f}`).join("\n"))}`;
     }
 
+    // ═══ Clone Website ═══
+    case "/clone": {
+      if (!arg) return R("Usage: /clone <url> — clone a website locally");
+
+      const spinner = ora(D(`Cloning ${arg.slice(0, 50)}...`)).start();
+
+      try {
+        const outcome = await executeTool("web_clone", { url: arg }, state.projectRoot);
+        spinner.stop();
+
+        if (outcome.ok) {
+          const outDir = `./cloned/${new URL(arg).hostname}/`;
+          return G(`\n${outcome.output}\n\n  ✅ Open: ${outDir}index.html`);
+        }
+        return R(`  Clone failed: ${outcome.output}`);
+      } catch (e: any) {
+        spinner.stop();
+        return R(`  Clone failed: ${e.message}`);
+      }
+    }
+
     // ═══ Quit ═══
     case "/quit":
     case "/exit":
@@ -1381,6 +1404,8 @@ if (process.argv.length <= 2) {
     console.error(D("  export ANTHROPIC_API_KEY=sk-ant-..."));
     console.error(D("  export OPENAI_API_KEY=sk-..."));
     console.error(D("  export GROQ_API_KEY=gsk_..."));
+    console.error(D("  export OPENAI_CODEX_AUTH_TOKEN=***"));
+    console.error(D("  # or: codex login    opencode (go install)"));
     console.error(D("\nOr create ~/.iorc.yaml:"));
     console.error(D("  provider: deepseek"));
     console.error(D("  keys:"));

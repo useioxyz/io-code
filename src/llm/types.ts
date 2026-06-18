@@ -1,11 +1,11 @@
 // ── Provider-agnostic normalized types ──
 
-export type ProviderId = "anthropic" | "openai" | "deepseek" | "groq" | "openrouter" | "custom";
+export type ProviderId = "anthropic" | "openai" | "deepseek" | "groq" | "openrouter" | "codex" | "opencode" | "custom";
 
 export interface ProviderMeta {
   id: ProviderId;
   name: string;
-  protocol: "anthropic-messages" | "openai-completions";
+  protocol: "anthropic-messages" | "openai-completions" | "codex-cli" | "opencode-cli";
   baseUrl: string;
   defaultModel: string;
   keyEnv: string;
@@ -58,6 +58,24 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderMeta> = {
     keyEnv: "OPENROUTER_API_KEY",
     description: "Multi-provider gateway — access all models",
   },
+  codex: {
+    id: "codex",
+    name: "OpenAI Codex (OAuth)",
+    protocol: "codex-cli",
+    baseUrl: "",
+    defaultModel: "gpt-5.5-codex",
+    keyEnv: "OPENAI_CODEX_AUTH_TOKEN",
+    description: "OpenAI Codex CLI — OAuth device flow, no API key needed",
+  },
+  opencode: {
+    id: "opencode",
+    name: "OpenCode (Go)",
+    protocol: "opencode-cli",
+    baseUrl: "",
+    defaultModel: "deepseek-v4-pro",
+    keyEnv: "OPENCODE_API_KEY",
+    description: "OpenCode Go CLI — multi-provider via subprocess (DeepSeek, Anthropic, OpenAI)",
+  },
   custom: {
     id: "custom",
     name: "Custom",
@@ -92,6 +110,15 @@ export const MODEL_PRESETS: Record<ProviderId, Array<{ id: string; name: string;
     { id: "anthropic/claude-opus-4", name: "Claude Opus 4", description: "via OpenRouter" },
     { id: "openai/gpt-5.1", name: "GPT-5.1", description: "via OpenRouter" },
     { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", description: "via OpenRouter" },
+  ],
+  codex: [
+    { id: "gpt-5.5-codex", name: "GPT-5.5 Codex", description: "Codex CLI (OAuth)" },
+    { id: "gpt-5-codex", name: "GPT-5 Codex", description: "Codex CLI (OAuth)" },
+  ],
+  opencode: [
+    { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", description: "via OpenCode Go" },
+    { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", description: "via OpenCode Go (fast)" },
+    { id: "claude-sonnet-4-6", name: "Claude Sonnet 4", description: "via OpenCode Go" },
   ],
   custom: [
     { id: "custom-model", name: "Custom Model", description: "Configure in .iorc" },
@@ -167,7 +194,7 @@ export type ProviderEvent =
 
 export interface ProviderConfig {
   provider: ProviderId;
-  apiKey: string;
+  apiKey?: string;
   model: string;
   baseUrl?: string;
   maxTokens?: number;

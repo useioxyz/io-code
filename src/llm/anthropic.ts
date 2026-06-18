@@ -68,7 +68,7 @@ export async function* streamAnthropic(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": cfg.apiKey,
+      "x-api-key": cfg.apiKey ?? "",
       "anthropic-version": "2023-06-01",
       "anthropic-beta": "tools-2024-04-04",
     },

@@ -10,6 +10,8 @@ import type {
 import { PROVIDER_REGISTRY } from "./types.js";
 import { streamAnthropic } from "./anthropic.js";
 import { streamOpenAI, completeOpenAI } from "./openai.js";
+import { streamCodex } from "./codex.js";
+import { streamOpenCode } from "./opencode.js";
 
 export * from "./types.js";
 
@@ -36,6 +38,22 @@ export function createProvider(cfg: ProviderConfig): LLMProvider {
     return {
       async *streamChat(systemPrompt, messages, tools) {
         yield* streamAnthropic(resolvedCfg, systemPrompt, messages, tools);
+      },
+    };
+  }
+
+  if (protocol === "codex-cli") {
+    return {
+      async *streamChat(systemPrompt, messages, tools) {
+        yield* streamCodex(resolvedCfg, systemPrompt, messages, tools);
+      },
+    };
+  }
+
+  if (protocol === "opencode-cli") {
+    return {
+      async *streamChat(systemPrompt, messages, tools) {
+        yield* streamOpenCode(resolvedCfg, systemPrompt, messages, tools);
       },
     };
   }

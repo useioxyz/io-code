@@ -17,6 +17,7 @@
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "glob": "^11.0.2",
+    "node-html-parser": "^7.1.0",
     "ora": "^8.2.0",
     "yaml": "^2.7.1"
   },
@@ -27,7 +28,14 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["ai", "coding-agent", "cli", "io", "privacy", "byok"],
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "cli",
+    "io",
+    "privacy",
+    "byok"
+  ],
   "license": "Apache-2.0",
   "repository": "https://github.com/useioxyz/io-code"
 }

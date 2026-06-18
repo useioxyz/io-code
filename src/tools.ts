@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { glob } from "glob";
+import { parse, type HTMLElement } from "node-html-parser";
 
 export interface ToolOutcome {
   ok: boolean;
@@ -161,6 +162,19 @@ export const TOOL_DEFS: ToolDef[] = [
       type: "object",
       properties: {
         url: { type: "string", description: "URL to fetch" },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "web_clone",
+    description:
+      "Clone/download a website locally. Fetches HTML, CSS, JS, images, fonts, and rewrites paths to be local. Saves to ./cloned/<domain>/.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Website URL to clone (e.g. https://example.com)" },
+        max_depth: { type: "number", description: "Max link depth to follow (default: 1 = single page only)" },
       },
       required: ["url"],
     },
@@ -594,6 +608,208 @@ export async function executeTool(
         }
       }
 
+      case "web_clone": {
+        const url = (input.url as string).replace(/\/$/, "");
+        const maxDepth = (input.max_depth as number) ?? 1;
+
+        let baseUrl: URL;
+        try {
+          baseUrl = new URL(url);
+        } catch {
+          return { ok: false, output: `Invalid URL: ${url}` };
+        }
+
+        const domain = baseUrl.hostname;
+        const outDir = path.join(projectRoot, "cloned", domain);
+        fs.mkdirSync(outDir, { recursive: true });
+
+        const fetched = new Set<string>();
+        const assets = new Map<string, Buffer>();
+        const stats = { html: 0, css: 0, js: 0, img: 0, font: 0, other: 0 };
+
+        // Resolve a potentially relative URL against the base
+        const resolveUrl = (raw: string): string => {
+          if (!raw || raw.startsWith("data:") || raw.startsWith("#") || raw.startsWith("javascript:") || raw.startsWith("mailto:")) return "";
+          try {
+            return new URL(raw, baseUrl).href;
+          } catch {
+            return "";
+          }
+        };
+
+        // Download an asset and return the local path
+        const downloadAsset = async (assetUrl: string, ext: string): Promise<string | null> => {
+          if (fetched.has(assetUrl)) return assetUrl;
+          fetched.add(assetUrl);
+
+          try {
+            const resp = await fetch(assetUrl, {
+              signal: AbortSignal.timeout(15_000),
+              headers: { "User-Agent": "IO-Code/0.2.0" },
+            });
+            if (!resp.ok) return null;
+
+            const buffer = Buffer.from(await resp.arrayBuffer());
+
+            // Build a clean local filename
+            const urlPath = new URL(assetUrl).pathname;
+            const filename = path.basename(urlPath) || `asset_${fetched.size}${ext}`;
+            const localPath = `cloned/${domain}/assets/${filename}`;
+            const fullPath = path.join(projectRoot, localPath);
+            fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+            fs.writeFileSync(fullPath, buffer);
+            assets.set(assetUrl, buffer);
+
+            // Track type
+            if (ext === ".css") stats.css++;
+            else if (ext === ".js") stats.js++;
+            else if ([".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"].includes(ext)) stats.img++;
+            else if ([".woff", ".woff2", ".ttf", ".eot", ".otf"].includes(ext)) stats.font++;
+            else stats.other++;
+
+            return `assets/${filename}`;
+          } catch {
+            return null;
+          }
+        };
+
+        // Step 1: Fetch the main HTML
+        let htmlText: string;
+        try {
+          const resp = await fetch(url, {
+            signal: AbortSignal.timeout(15_000),
+            headers: { "User-Agent": "IO-Code/0.2.0" },
+          });
+          if (!resp.ok) return { ok: false, output: `HTTP ${resp.status} for ${url}` };
+          htmlText = await resp.text();
+        } catch (e: any) {
+          return { ok: false, output: `Failed to fetch ${url}: ${e.message}` };
+        }
+        stats.html++;
+
+        // Step 2: Parse HTML
+        const root = parse(htmlText);
+
+        // Collect all asset URLs
+        interface AssetRef { el: HTMLElement; attr: string; url: string; ext: string; }
+        const refs: AssetRef[] = [];
+
+        const collectAttr = (selector: string, attr: string, extMap: Record<string, string>) => {
+          for (const el of root.querySelectorAll(selector)) {
+            const val = el.getAttribute(attr);
+            if (!val) continue;
+            const full = resolveUrl(val);
+            if (!full) continue;
+            const ext = path.extname(new URL(full).pathname).toLowerCase() || extMap[selector] || "";
+            refs.push({ el, attr, url: full, ext });
+          }
+        };
+
+        // <link> — stylesheets, icons
+        for (const el of root.querySelectorAll("link[href]")) {
+          const rel = el.getAttribute("rel") ?? "";
+          const href = el.getAttribute("href") ?? "";
+          const full = resolveUrl(href);
+          if (!full) continue;
+          const u = new URL(full);
+          const ext = path.extname(u.pathname).toLowerCase();
+          if (rel.includes("stylesheet") || ext === ".css") refs.push({ el, attr: "href", url: full, ext: ".css" });
+          else if (rel.includes("icon") || ext === ".ico") refs.push({ el, attr: "href", url: full, ext: ext || ".ico" });
+          else if ([".woff", ".woff2", ".ttf", ".eot", ".otf"].includes(ext)) refs.push({ el, attr: "href", url: full, ext });
+        }
+
+        // <script src>
+        collectAttr("script[src]", "src", {});
+        // <img src> and <img srcset>
+        for (const el of root.querySelectorAll("img")) {
+          const src = resolveUrl(el.getAttribute("src") ?? "");
+          if (src) {
+            const ext = path.extname(new URL(src).pathname).toLowerCase() || ".png";
+            refs.push({ el, attr: "src", url: src, ext });
+          }
+          // srcset
+          const srcset = el.getAttribute("srcset");
+          if (srcset) {
+            const parts = srcset.split(",").map(s => s.trim().split(/\s+/)[0]);
+            for (const p of parts) {
+              const full = resolveUrl(p);
+              if (full) {
+                const ext = path.extname(new URL(full).pathname).toLowerCase() || ".png";
+                refs.push({ el, attr: "srcset", url: full, ext });
+              }
+            }
+          }
+        }
+        // <source src> and srcset
+        for (const el of root.querySelectorAll("source")) {
+          for (const attr of ["src", "srcset"]) {
+            const val = el.getAttribute(attr);
+            if (!val) continue;
+            for (const p of val.split(",").map(s => s.trim().split(/\s+/)[0])) {
+              const full = resolveUrl(p);
+              if (full) {
+                const ext = path.extname(new URL(full).pathname).toLowerCase() || ".mp4";
+                refs.push({ el, attr, url: full, ext });
+              }
+            }
+          }
+        }
+        // <video poster>, <audio src>, <source src>
+        collectAttr("video[poster]", "poster", {});
+        collectAttr("audio[src]", "src", {});
+
+        // Build URL→localPath map
+        const urlMap = new Map<string, string>();
+
+        // Download all assets (sequential to be polite)
+        const results: string[] = [];
+        for (const ref of refs) {
+          if (urlMap.has(ref.url)) continue;
+          const local = await downloadAsset(ref.url, ref.ext || "");
+          if (local) {
+            urlMap.set(ref.url, local);
+          } else {
+            results.push(`  ✗ ${ref.url}`);
+          }
+        }
+
+        // Step 3: Rewrite paths in HTML
+        for (const ref of refs) {
+          const local = urlMap.get(ref.url);
+          if (local) {
+            ref.el.setAttribute(ref.attr, local);
+            // Handle srcset rewriting
+            if (ref.attr === "srcset") {
+              ref.el.setAttribute("srcset", local);
+            }
+          }
+        }
+
+        // Step 4: Save rewritten HTML
+        const htmlPath = path.join(outDir, "index.html");
+        fs.writeFileSync(htmlPath, root.toString(), "utf-8");
+
+        // Summary
+        const total = stats.html + stats.css + stats.js + stats.img + stats.font + stats.other;
+        const lines = [
+          `🌐 Cloned ${url}`,
+          ``,
+          `  📄 ${stats.html} HTML  ·  ${stats.css} CSS  ·  ${stats.js} JS  ·  ${stats.img} images  ·  ${stats.font} fonts  ·  ${stats.other} other`,
+          `  📁 ${outDir}`,
+          ``,
+          `  Total: ${total} files (${refs.length} asset refs, ${urlMap.size} downloaded)`,
+        ];
+
+        if (results.length > 0) {
+          lines.push(``);
+          lines.push(`  Failed (${results.length}):`);
+          lines.push(...results.slice(0, 10));
+          if (results.length > 10) lines.push(`  ... ${results.length - 10} more`);
+        }
+
+        return { ok: true, output: lines.join("\n") };
+      }
+
       case "git_diff": {
         const target = input.target as string | undefined;
         let args = "diff -- .";
@@ -694,6 +910,7 @@ export function toolTitle(name: string, input: Record<string, unknown>): string 
     case "run_tests": return `Run tests${input.filter ? ` (filter: ${input.filter})` : ""}`;
     case "web_search": return `Search web: "${input.query}"`;
     case "web_fetch": return `Fetch ${input.url}`;
+    case "web_clone": return `Clone ${input.url}`;
     case "git_diff": return `Git diff${input.target ? ` ${input.target}` : ""}`;
     case "git_status": return "Git status";
     case "git_log": return `Git log (${input.count ?? 10})`;

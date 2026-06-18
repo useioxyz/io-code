@@ -49,6 +49,8 @@ io -p anthropic -m claude-opus-4-8 "Refactor"  # custom provider/model
 | DeepSeek | `DEEPSEEK_API_KEY` | deepseek-v4-pro |
 | Groq | `GROQ_API_KEY` | llama-4-maverick |
 | OpenRouter | `OPENROUTER_API_KEY` | anthropic/claude-sonnet-4 |
+| Codex (OAuth) | `codex login` | gpt-5.5-codex |
+| OpenCode (Go) | `opencode` CLI | deepseek-v4-pro |
 
 ## Slash Commands
 
@@ -67,6 +69,7 @@ io -p anthropic -m claude-opus-4-8 "Refactor"  # custom provider/model
 | `/status` | Git status |
 | `/log [n]` | Git log |
 | `/find <pattern>` | Find files by glob |
+| `/clone <url>` | Clone website locally (HTML+CSS+JS+assets) |
 | `/workspace` | List workspace files |
 | `/reload` | Reload context files |
 | `/quit` | Exit |
