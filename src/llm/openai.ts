@@ -11,21 +11,16 @@ import { parseOpenAISSE } from "./sse.js";
 function agentToOpenAIMessages(
   messages: AgentMessage[],
 ): Array<Record<string, unknown>> {
-  return messages.map((m) => {
-    const content: Array<Record<string, unknown>> = [];
+  const result: Array<Record<string, unknown>> = [];
+
+  for (const m of messages) {
+    const textParts: string[] = [];
     const toolCalls: Array<Record<string, unknown>> = [];
-    let hasToolResults = false;
+    const toolResults: Array<{ tool_call_id: string; content: string }> = [];
 
     for (const block of m.content) {
       if (block.type === "text") {
-        if (m.role === "assistant" && toolCalls.length > 0) {
-          // Text in tool_call message goes alongside
-          content.push({ type: "text", text: block.text });
-        } else if (m.role === "user") {
-          content.push({ type: "text", text: block.text });
-        } else if (m.role === "assistant") {
-          content.push({ type: "text", text: block.text });
-        }
+        textParts.push(block.text);
       } else if (block.type === "tool_use") {
         toolCalls.push({
           id: block.id,
@@ -36,32 +31,43 @@ function agentToOpenAIMessages(
           },
         });
       } else if (block.type === "tool_result") {
-        hasToolResults = true;
-        content.push({
-          role: "tool",
+        toolResults.push({
           tool_call_id: block.tool_use_id,
           content: block.content,
         });
       }
     }
 
-    const msg: Record<string, unknown> = { role: m.role };
-
-    if (hasToolResults) {
-      msg.content = content;
-    } else if (toolCalls.length > 0) {
-      msg.content = content.length > 0 ? content : null;
-      msg.tool_calls = toolCalls;
-    } else {
-      msg.content = content.length > 0
-        ? content.map(c => c.type === "text" ? (c as any).text : c)
-        : (content.length === 1 && (content[0] as any).type === "text"
-          ? (content[0] as any).text
-          : (content.length > 0 ? content : ""));
+    // Tool results → separate messages with role: "tool" (OpenAI format)
+    for (const tr of toolResults) {
+      result.push({
+        role: "tool",
+        tool_call_id: tr.tool_call_id,
+        content: tr.content,
+      });
     }
 
-    return msg;
-  });
+    // Main message
+    if (toolCalls.length > 0) {
+      // Assistant message with tool calls — content as plain string or null
+      result.push({
+        role: "assistant",
+        content: textParts.join("\n") || null,
+        tool_calls: toolCalls,
+      });
+    } else if (textParts.length > 0) {
+      // Plain text message — content as plain string (max compatibility)
+      result.push({
+        role: m.role,
+        content: textParts.join("\n"),
+      });
+    } else if (toolResults.length === 0) {
+      // Empty message — skip entirely
+      continue;
+    }
+  }
+
+  return result;
 }
 
 function toolsToOpenAI(tools: ToolDef[]): Array<Record<string, unknown>> {
