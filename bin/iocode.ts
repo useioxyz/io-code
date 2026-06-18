@@ -43,22 +43,28 @@ const M = chalk.magenta;
 
 function showBanner(): string {
   const termWidth = process.stdout.columns ?? 80;
-  if (termWidth < 70) {
+
+  // Narrow terminal — compact mode
+  if (termWidth < 60) {
     return [
       ``,
-      `  ${I("▌▐  ▐▌")}  ${D(`IO Code v${VERSION}`)}`,
-      `  ${W("▐▛▀▜▌")}  ${D("private coding agent")}`,
-      `  ${W("▐  ▐▌")}  ${D("BYOK · I/O Protocol")}`,
+      `  ${I("⬢")} ${B("IO CODE")}  ${D(`v${VERSION}`)}`,
+      `  ${D("private agent · BYOK · I/O Protocol")}`,
       ``,
     ].join("\n");
   }
+
+  // Full banner
   return [
     ``,
-    `  ${I("▌▐  ▐▌")}  ${W("▐▛▀▜▌ ▐▛▀▀▘ ▐▛▀▜▌ ▐▛▀▀▘ ▐▛▀▀▘")}`,
-    `  ${I("▐▛▀▜▌")}  ${W("▐▌ ▐▌ ▐▌    ▐▌ ▐▌ ▐▌    ▐▌▀▀▘")}`,
-    `  ${I("▐▌ ▐▌")}  ${W("▐▌ ▐▌ ▐▙▄▄▘ ▐▌ ▐▌ ▐▙▄▄▘ ▐▙▄▄▘")}`,
+    `       ${I("██╗ ██████╗")}      ${W("██████╗  ██████╗  ██████╗  ███████╗")}`,
+    `       ${I("██║██╔═══██╗")}    ${W("██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝")}`,
+    `       ${I("██║██║   ██║")}    ${W("██║      ██║   ██║ ██║  ██║ █████╗  ")}`,
+    `       ${I("██║██║   ██║")}    ${W("██║      ██║   ██║ ██║  ██║ ██╔══╝  ")}`,
+    `       ${I("██║╚██████╔╝")}    ${W("╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗")}`,
+    `       ${I("╚═╝ ╚═════╝")}      ${W("╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝")}`,
     ``,
-    `  ${D(`private coding agent  ·  BYOK  ·  v${VERSION}`)}`,
+    `       ${D(`private coding agent  ·  BYOK  ·  v${VERSION}  ·  I/O Protocol`)}`,
     ``,
   ].join("\n");
 }
@@ -96,6 +102,8 @@ interface SessionState {
   sessionName?: string;
   /** File change journal — powers /undo */
   fileJournal: FileChangeEntry[];
+  /** Map of provider → API key for all configured providers */
+  connectedProviders: Map<ProviderId, string>;
 }
 
 interface FileChangeEntry {
@@ -351,7 +359,14 @@ async function runRepl(
     planMode: false,
     agents,
     fileJournal: [],
+    connectedProviders: new Map(),
   };
+
+  // Populate connected providers from env + config
+  for (const pid of Object.keys(PROVIDER_REGISTRY)) {
+    const key = getApiKey(config, pid as ProviderId);
+    if (key) state.connectedProviders.set(pid as ProviderId, key);
+  }
 
   // Resume session if requested
   if (resumeSession) {
@@ -420,12 +435,22 @@ async function runRepl(
     console.log(D(`  agents: ${agents.map(a => `@${a.name}`).join(", ")}`));
   }
 
+  // Connected providers bar
+  const connected = state.connectedProviders;
+  if (connected.size > 0) {
+    const badges = Array.from(connected.entries()).map(([id]) => {
+      const active = id === (state.providerConfig?.provider ?? "");
+      return active ? G(`● ${id}`) : D(`○ ${id}`);
+    }).join("  ");
+    console.log(D(`  providers: ${badges}`));
+  }
+
   // Setup hint: no API key yet
   if (!providerConfig.apiKey && providerConfig.provider !== "codex" && providerConfig.provider !== "opencode") {
     console.log(Y(`\n  ⚡ No API key configured. Set it up now:`));
     console.log(D(`  /provider <name>   — switch provider (deepseek, anthropic, openai, ...)`));
     console.log(D(`  /key <your-key>    — set API key`));
-    console.log(D(`  /model <name>      — switch model`));
+    console.log(D(`  /models            — browse models from all connected providers`));
     console.log(D(`  /help              — all commands`));
     console.log("");
   }
@@ -749,7 +774,7 @@ async function handleCommand(
         ``,
         `  ${C("IO Code")} ${D(`v${VERSION}  ·  ${state.providerConfig?.provider ?? "?"}  ·  ${state.providerConfig?.model ?? "?"}`)}`,
         ``,
-        `  ${B("▸ Session")}     /model /provider /config /key /temp /clear /session /sessions /handoff /export`,
+        `  ${B("▸ Session")}     /model /models /provider /config /key /temp /clear /session /sessions /handoff /export`,
         `  ${B("▸ Context")}    /project /reload /compact /tokens /cost /init`,
         `  ${B("▸ Code")}       /review /plan /todos /agents /lint /undo`,
         `  ${B("▸ Files")}      /find /workspace /clone`,
@@ -799,6 +824,37 @@ async function handleCommand(
       return G(`  Model → ${match.name} (${match.id})  (saved)\n${newCost ? `  ${newCost}` : ""}`);
     }
 
+    // ═══ Models — show all from connected providers ═══
+    case "/models": {
+      const allConnected = Array.from(state.connectedProviders.entries());
+      if (allConnected.length === 0) {
+        return D("  No providers connected. Use /key <api-key> to set up a key.");
+      }
+
+      const lines: string[] = [
+        ``,
+        `  ${C("Models")} ${D(`(${allConnected.length} connected provider${allConnected.length > 1 ? "s" : ""})`)}`,
+        ``,
+      ];
+
+      for (const [pid] of allConnected) {
+        const meta = PROVIDER_REGISTRY[pid];
+        const presets = MODEL_PRESETS[pid] ?? [];
+        const isActive = pid === (state.providerConfig?.provider ?? "");
+        lines.push(`  ${isActive ? G("▶") : C("▹")} ${C(meta.name)} ${D(`(${pid})`)}`);
+        for (const m of presets) {
+          const active = m.id === state.providerConfig?.model && isActive ? G("●") : "○";
+          const priceInfo = estimateCost(pid, m.id, 0, 0);
+          const priceStr = priceInfo.total === 0 ? "free" : `$${priceInfo.total.toFixed(2)}/M out`;
+          lines.push(`    ${active} ${m.name} ${D(`(${m.id})`)}  ${D(priceStr)}`);
+        }
+        lines.push(``);
+      }
+
+      lines.push(`  ${D(`To switch provider: /provider <name>  ·  To switch model: /model <name>`)}`);
+      return lines.join("\n");
+    }
+
     // ═══ Provider ═══
     case "/provider":
     case "/p": {
@@ -839,6 +895,8 @@ async function handleCommand(
       };
       state.config.provider = match;
       state.config.model = PROVIDER_REGISTRY[match].defaultModel;
+      // Register key in connected providers
+      if (apiKey) state.connectedProviders.set(match, apiKey);
       saveConfig(state.config, false, state.projectRoot);
       return G(`  Provider → ${match} (${PROVIDER_REGISTRY[match].defaultModel})  (saved)`);
     }
@@ -860,6 +918,8 @@ async function handleCommand(
       state.providerConfig.apiKey = arg;
       state.config.keys ??= {};
       state.config.keys[state.providerConfig.provider] = arg;
+      // Register in connected providers
+      state.connectedProviders.set(state.providerConfig.provider, arg);
       saveConfig(state.config, true);
       return G("  API key set (saved to ~/.iorc.yaml)");
     }

@@ -67,6 +67,7 @@ io -p anthropic -m claude-opus-4-8 "Refactor"
 |---------|-------------|
 | `/help` | Show all commands |
 | `/model [name]` | List or switch models |
+| `/models` | Browse models from ALL connected providers |
 | `/provider [name]` | List or switch providers |
 | `/config` | Show current config |
 | `/key <api-key>` | Set API key |
