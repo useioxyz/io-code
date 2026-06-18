@@ -1652,32 +1652,5 @@ async function expandFileRefs(
 
 // ── Startup ──
 
-if (process.argv.length <= 2) {
-  const projectRoot = process.cwd();
-  const config = loadConfig(projectRoot);
-
-  let pc: ProviderConfig;
-
-  if (!config.provider) {
-    // No provider yet — still enter REPL, let user configure from inside
-    pc = {
-      provider: "deepseek",
-      model: "deepseek-v4-pro",
-      apiKey: undefined,
-    };
-  } else {
-    const apiKey = getApiKey(config, config.provider);
-    pc = {
-      provider: config.provider,
-      model: config.model ?? PROVIDER_REGISTRY[config.provider]?.defaultModel ?? "unknown",
-      apiKey: apiKey ?? undefined,
-      baseUrl: config.baseUrl,
-      temperature: config.temperature,
-    };
-  }
-
-  runRepl(pc, projectRoot, config).catch(e => {
-    console.error(R(`\n  Fatal: ${e.message}`));
-    process.exit(1);
-  });
-}
+// NOTE: REPL is launched by Commander's .action() handler above.
+// Do not add a second entry point here — it causes the banner to print twice.

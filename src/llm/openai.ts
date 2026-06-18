@@ -49,17 +49,19 @@ function agentToOpenAIMessages(
 
     // Main message
     if (toolCalls.length > 0) {
-      // Assistant message with tool calls — content as plain string or null
+      // Assistant message with tool calls
       result.push({
         role: "assistant",
-        content: textParts.join("\n") || null,
+        content: textParts.length > 0
+          ? textParts.map(t => ({ type: "text", text: t }))
+          : null,
         tool_calls: toolCalls,
       });
     } else if (textParts.length > 0) {
-      // Plain text message — content as plain string (max compatibility)
+      // Text message — content as array of content blocks (required by DeepSeek V4)
       result.push({
         role: m.role,
-        content: textParts.join("\n"),
+        content: textParts.map(t => ({ type: "text", text: t })),
       });
     } else if (toolResults.length === 0) {
       // Empty message — skip entirely
