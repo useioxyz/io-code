@@ -39,24 +39,16 @@ const Y = chalk.yellow;
 const B = chalk.bold;
 const M = chalk.magenta;
 
-// ── Box UI helpers ──
+// ── UI helpers ──
 
-function boxWidth(): number {
-  return Math.min(process.stdout.columns ?? 80, 76);
+const INDENT = "  ";
+function ind(text: string): string {
+  return INDENT + text;
 }
-function boxTop(label = ""): string {
-  const w = boxWidth();
-  const inner = w - 4 - label.length;
-  return `  ${D("╭─ " + label + "─".repeat(Math.max(2, inner)) + "╮")}`;
+function sepLine(): string {
+  const w = Math.min(process.stdout.columns ?? 80, 72);
+  return INDENT + D("─".repeat(w - 2));
 }
-function boxBottom(): string {
-  const w = boxWidth();
-  return `  ${D("╰" + "─".repeat(w - 2) + "╯")}`;
-}
-function boxLine(text: string): string {
-  return `  ${D("│")} ${text}`;
-}
-const BOX_LEFT = `  ${D("│")} `;
 
 // ── Banner ──
 
@@ -71,7 +63,7 @@ function showBanner(): string {
     ].join("\n");
   }
 
-  // Full banner — flush left, tight (no surrounding blank lines)
+  // Full banner — flush left, tight
   return [
     `${I("██╗ ██████╗")}      ${W("██████╗  ██████╗  ██████╗  ███████╗")}`,
     `${I("██║██╔═══██╗")}    ${W("██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝")}`,
@@ -395,13 +387,11 @@ async function runRepl(
   }
 
   console.log(showBanner());
-  console.log("");
 
-  // Startup info — inside box top
-  console.log(boxTop("I/O"));
-
-  // Startup info line
-  console.log(boxLine(D(`${providerConfig.provider}  ·  ${providerConfig.model}  ·  ${projectRoot}`)));
+  // Startup info — compact 2-space indent block
+  const infoLines: string[] = [
+    D(`${providerConfig.provider}  ·  ${providerConfig.model}  ·  ${projectRoot}`),
+  ];
 
   // Git branch + status
   try {
@@ -433,26 +423,24 @@ async function runRepl(
       if (dirtyCount > 0) statusLine += Y(`  ${dirtyCount} dirty`);
       if (ahead && parseInt(ahead) > 0) statusLine += D(`  ↑${ahead}`);
       if (behind && parseInt(behind) > 0) statusLine += D(`  ↓${behind}`);
-      console.log(boxLine(statusLine));
+      infoLines.push(statusLine);
     }
   } catch {}
 
+  const metaParts: string[] = [];
   if (contextFiles.length > 0) {
-    console.log(boxLine(D(`Context: ${contextFiles.map(f => f.name).join(", ")}`)));
+    metaParts.push(`Context: ${contextFiles.map(f => f.name).join(", ")}`);
   }
-
   if (projectInfo.type !== "unknown") {
     const parts = [`${projectInfo.icon} ${projectInfo.label}`];
     if (projectInfo.packageManager) parts.push(projectInfo.packageManager);
     if (projectInfo.buildTool) parts.push(projectInfo.buildTool);
     if (projectInfo.testFramework) parts.push(`🧪${projectInfo.testFramework}`);
-    console.log(boxLine(D(`project: ${parts.join(" · ")}`)));
+    metaParts.push(`project: ${parts.join(" · ")}`);
   }
-
   if (agents.length > 0) {
-    console.log(boxLine(D(`agents: ${agents.map(a => `@${a.name}`).join(", ")}`)));
+    metaParts.push(`agents: ${agents.map(a => `@${a.name}`).join(", ")}`);
   }
-
   // Connected providers bar
   const connected = state.connectedProviders;
   if (connected.size > 0) {
@@ -460,26 +448,27 @@ async function runRepl(
       const active = id === (state.providerConfig?.provider ?? "");
       return active ? G(`● ${id}`) : D(`○ ${id}`);
     }).join("  ");
-    console.log(boxLine(D(`providers: ${badges}`)));
+    metaParts.push(`providers: ${badges}`);
   }
+  if (metaParts.length > 0) infoLines.push(D(metaParts.join("  ·  ")));
 
   // Setup hint: no API key yet
   if (!providerConfig.apiKey && providerConfig.provider !== "codex" && providerConfig.provider !== "opencode") {
-    console.log(boxLine(Y(`⚡ No API key. /key <your-key>  ·  /provider <name>  ·  /models`)));
+    infoLines.push(Y(`⚡ No API key. /key <your-key>  ·  /provider <name>  ·  /models`));
   }
 
   if (resumeSession) {
-    console.log(boxLine(G(`↻ Resumed: ${resumeSession} (${state.conversation.length} msgs, ${state.todos.filter(t => !t.done).length} todos)`)));
+    infoLines.push(G(`↻ Resumed: ${resumeSession} (${state.conversation.length} msgs, ${state.todos.filter(t => !t.done).length} todos)`));
   }
 
-  console.log(boxBottom());
+  console.log(infoLines.map(ind).join("\n"));
   console.log("");
 
   const history = loadHistory();
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: state.planMode ? M(`${BOX_LEFT}📋 ❯ `) : C(`${BOX_LEFT}❯ `),
+    prompt: state.planMode ? M("📋 ❯ ") : C("❯ "),
     terminal: false, // raw mode off — avoids double-echo when running via Discord/Terminal proxy
     history,
     historySize: 500,
@@ -496,7 +485,7 @@ async function runRepl(
     if (line.endsWith("\\") && !inMultiline) {
       inMultiline = true;
       multilineBuffer = [line.slice(0, -1)];
-      rl.setPrompt(D(`${BOX_LEFT}| `));
+      rl.setPrompt(D("  | "));
       rl.prompt();
       return;
     }
@@ -504,13 +493,13 @@ async function runRepl(
     if (inMultiline) {
       if (line.trim() === "") {
         inMultiline = false;
-        rl.setPrompt(state.planMode ? M(`${BOX_LEFT}📋 ❯ `) : C(`${BOX_LEFT}❯ `));
+        rl.setPrompt(state.planMode ? M("📋 ❯ ") : C("❯ "));
         rl.prompt();
         return;
       }
       if (line === ".") {
         inMultiline = false;
-        rl.setPrompt(state.planMode ? M(`${BOX_LEFT}📋 ❯ `) : C(`${BOX_LEFT}❯ `));
+        rl.setPrompt(state.planMode ? M("📋 ❯ ") : C("❯ "));
         await processInput(state, multilineBuffer.join("\n"), rl);
         saveLine(multilineBuffer.join("\\n"));
         if (!state.exit) rl.prompt();
@@ -535,16 +524,16 @@ async function runRepl(
     if (input.startsWith("/")) {
       const result = await handleCommand(input, state);
       if (result) {
-        // Box-align each line of command output
+        // Indent each line of command output to align with chat
         for (const ln of result.split("\n")) {
-          console.log(ln ? boxLine(ln) : "");
+          console.log(ln ? ind(ln) : "");
         }
       }
       if (state.exit) {
         rl.close();
         return;
       }
-      rl.setPrompt(state.planMode ? M(`${BOX_LEFT}📋 ❯ `) : C(`${BOX_LEFT}❯ `));
+      rl.setPrompt(state.planMode ? M("📋 ❯ ") : C("❯ "));
       rl.prompt();
       return;
     }
@@ -562,7 +551,7 @@ async function runRepl(
         });
         // Box-align each line of output
         for (const ln of output.slice(0, 5000).split("\n")) {
-          console.log(boxLine(D(ln)));
+          console.log(ind(D(ln)));
         }
 
         if (!input.startsWith("!!")) {
@@ -570,10 +559,10 @@ async function runRepl(
             role: "user",
             content: [{ type: "text", text: `Command output:\n${output.slice(0, 3000)}` }],
           });
-          console.log(boxLine(D("(output sent to agent context)")));
+          console.log(ind(D("(output sent to agent context)")));
         }
       } catch (e: any) {
-        console.log(boxLine(R((e.stderr ?? e.message).toString().split("\n")[0].slice(0, 200))));
+        console.log(ind(R((e.stderr ?? e.message).toString().split("\n")[0].slice(0, 200))));
       }
       rl.prompt();
       return;
@@ -589,7 +578,6 @@ async function runRepl(
 
   rl.on("close", () => {
     console.log("");
-    console.log(boxBottom());
     console.log(D("  bye 👋"));
     console.log("");
     process.exit(0);
@@ -632,26 +620,26 @@ async function processInput(
 
   // Check if API key is configured (skip for OAuth-based providers)
   if (!state.providerConfig.apiKey && state.providerConfig.provider !== "codex" && state.providerConfig.provider !== "opencode") {
-    console.log(boxLine(Y(`⚠️  No API key. /key <your-key> or /provider to switch.`)));
-    console.log(boxLine(D(`Current: ${state.providerConfig.provider}  ·  ${state.providerConfig.model}`)));
+    console.log(ind(Y(`⚠️  No API key. /key <your-key> or /provider to switch.`)));
+    console.log(ind(D(`Current: ${state.providerConfig.provider}  ·  ${state.providerConfig.model}`)));
     return;
   }
 
   // Auto-compaction warning
   const msgCount = state.conversation.length;
   if (msgCount > state.compactThreshold) {
-    console.log(boxLine(Y(`💡 ${msgCount} messages — /compact to save tokens`)));
+    console.log(ind(Y(`💡 ${msgCount} messages — /compact to save tokens`)));
   }
 
   // Pre-send cost estimation (only for paid providers)
   const preEstimate = preSendEstimate(state);
   if (preEstimate && !preEstimate.includes("free")) {
-    console.log(boxLine(D(preEstimate.trim())));
+    console.log(ind(D(preEstimate.trim())));
   }
 
   // Auto-compaction threshold reached
   if (msgCount > 25) {
-    console.log(boxLine(Y(`⚠️  ${msgCount} messages — context large. /compact or /clear.`)));
+    console.log(ind(Y(`⚠️  ${msgCount} messages — context large. /compact or /clear.`)));
   }
 
   // Plan mode: inject planning directive
@@ -713,12 +701,12 @@ async function processInput(
       switch (ev.type) {
         case "stream":
           if (ev.text) {
-            // Prefix each new line with box-left border for alignment
+            // Indent each new line to align with prompt text
             const text = ev.text;
             let out = "";
             for (let i = 0; i < text.length; i++) {
               if (atLineStart && text[i] !== "\n") {
-                out += BOX_LEFT;
+                out += INDENT;
                 atLineStart = false;
               }
               out += text[i];
@@ -731,13 +719,13 @@ async function processInput(
 
         case "tool_call":
           if (currentText) console.log("");
-          console.log(boxLine(`${C("◇")} ${ev.toolTitle}`));
+          console.log(ind(`${C("◇")} ${ev.toolTitle}`));
           break;
 
         case "tool_result":
           const icon = ev.toolOk ? G("✓") : R("✗");
           const outLine = (ev.toolOutput ?? "").split("\n")[0].slice(0, 120);
-          console.log(boxLine(`${D("┆")} ${icon} ${D(outLine)}`));
+          console.log(ind(`${D("┆")} ${icon} ${D(outLine)}`));
 
           // Record file change for /undo (git-based revert)
           if (ev.fileChange) {
@@ -763,8 +751,8 @@ async function processInput(
             ev.totalOutputTokens ?? 0,
           );
 
-          console.log(boxLine(D(`┌─ ✓ ${ev.steps} steps  ↥${ev.totalInputTokens?.toLocaleString() ?? 0} ↧${ev.totalOutputTokens?.toLocaleString() ?? 0}`)));
-          console.log(boxLine(D(`└─ ${ev.filesChanged} files changed  ${cost.label}`)));
+          console.log(ind(D(`┌─ ✓ ${ev.steps} steps  ↥${ev.totalInputTokens?.toLocaleString() ?? 0} ↧${ev.totalOutputTokens?.toLocaleString() ?? 0}`)));
+          console.log(ind(D(`└─ ${ev.filesChanged} files changed  ${cost.label}`)));
 
           if (state.conversation.length === 0) {
             state.conversation.push({
@@ -778,19 +766,20 @@ async function processInput(
               });
             }
           }
+          console.log(""); // blank before next prompt
           break;
 
         case "error":
           if (currentText) console.log("");
           atLineStart = true;
-          console.log(boxLine(R(`Error: ${ev.error}`)));
+          console.log(ind(R(`Error: ${ev.error}`)));
           break;
       }
     }
   } catch (e: any) {
     if (currentText) console.log("");
     atLineStart = true;
-    console.log(boxLine(R(`Error: ${e.message}`)));
+    console.log(ind(R(`Error: ${e.message}`)));
   } finally {
     rl.resume();
   }
