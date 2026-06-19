@@ -64,8 +64,24 @@ function buildOpenCodeRequest(
             tool_use_id: (b as any).tool_use_id,
             content: (b as any).content,
           }));
+        // Preserve assistant tool_use blocks as tool_calls so multi-turn
+        // tool calling keeps context (was dropped — only text + results sent).
+        const toolUses = m.content
+          .filter((b) => b.type === "tool_use")
+          .map((b) => ({
+            id: (b as any).id,
+            type: "function",
+            function: {
+              name: (b as any).name,
+              arguments: JSON.stringify((b as any).input ?? {}),
+            },
+          }));
 
-        const msg: any = { role: m.role, content: textBlocks || "" };
+        const msg: any = {
+          role: m.role,
+          content: textBlocks || (toolUses.length > 0 ? null : ""),
+        };
+        if (toolUses.length > 0) msg.tool_calls = toolUses;
         if (toolResults.length > 0) msg.tool_results = toolResults;
         return msg;
       }),

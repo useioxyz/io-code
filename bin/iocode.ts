@@ -638,9 +638,18 @@ async function processInput(
     console.log(ind(D(preEstimate.trim())));
   }
 
-  // Auto-compaction threshold reached
-  if (msgCount > 25) {
-    console.log(ind(Y(`⚠️  ${msgCount} messages — context large. /compact or /clear.`)));
+  // Auto-compaction — compact automatically when context grows too large.
+  // Default trigger: 2x the warning threshold (or 25 messages).
+  const autoThreshold = state.config.autoCompactThreshold ?? 25;
+  if (msgCount > autoThreshold) {
+    console.log(ind(D(`🪡 Auto-compacting ${msgCount} messages (threshold ${autoThreshold})...`)));
+    try {
+      const compacted = await compactConversation(state.providerConfig, state.conversation);
+      state.conversation = compacted;
+      console.log(ind(G(`  ↻ Compacted to ${state.conversation.length} messages`)));
+    } catch (e: any) {
+      console.log(ind(Y(`  ⚠️ Auto-compact failed: ${e.message}. Use /compact manually.`)));
+    }
   }
 
   // Plan mode: inject planning directive

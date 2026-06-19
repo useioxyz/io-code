@@ -15,14 +15,7 @@ export interface IOConfig {
   temperature?: number;
   maxSteps?: number;
   compactThreshold?: number;
-  // MCP servers
-  mcp_servers?: Record<string, {
-    command?: string;
-    args?: string[];
-    url?: string;
-    headers?: Record<string, string>;
-    env?: Record<string, string>;
-  }>;
+  autoCompactThreshold?: number;
 }
 
 /**
