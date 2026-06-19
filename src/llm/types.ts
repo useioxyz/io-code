@@ -187,6 +187,7 @@ export interface ToolDef {
 export type ProviderEvent =
   | { type: "text_delta"; text: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "tool_use_preview"; id: string; name: string }
   | { type: "tool_result"; tool_use_id: string; content: string }
   | { type: "usage"; inputTokens: number; outputTokens: number }
   | { type: "stop"; stopReason: string }

@@ -166,6 +166,18 @@ export const TOOL_DEFS: ToolDef[] = [
     },
   },
   {
+    name: "apply_diff",
+    description: "Apply a unified diff to a file. Handles multi-hunk edits in one call. Format: @@ hunk headers, ' ' context lines, '-' removed, '+' added. More robust than replace_in_file for multiple changes.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path to patch" },
+        diff: { type: "string", description: "Unified diff content (with @@ hunk headers)" },
+      },
+      required: ["path", "diff"],
+    },
+  },
+  {
     name: "delete_file",
     description: "Delete a file from the project.",
     input_schema: {
@@ -431,6 +443,76 @@ export async function executeTool(
             path: input.path as string,
             action: "modified",
           },
+        };
+      }
+
+      case "apply_diff": {
+        const filePath = safe(input.path as string);
+        const diff = input.diff as string;
+
+        if (!fs.existsSync(filePath)) {
+          return { ok: false, output: `File not found: ${input.path}` };
+        }
+
+        const content = fs.readFileSync(filePath, "utf-8");
+
+        // Parse unified diff into hunks. Each hunk: old context block → new block.
+        const diffLines = diff.split("\n");
+        const hunks: Array<{ oldLines: string[]; newLines: string[] }> = [];
+        let curOld: string[] = [];
+        let curNew: string[] = [];
+        let inHunk = false;
+
+        for (const line of diffLines) {
+          if (line.startsWith("@@")) {
+            if (inHunk) hunks.push({ oldLines: curOld, newLines: curNew });
+            curOld = [];
+            curNew = [];
+            inHunk = true;
+            continue;
+          }
+          if (!inHunk) continue; // skip file headers (---, +++) and noise
+          if (line.startsWith(" ")) {
+            curOld.push(line.slice(1));
+            curNew.push(line.slice(1));
+          } else if (line.startsWith("-")) {
+            curOld.push(line.slice(1));
+          } else if (line.startsWith("+")) {
+            curNew.push(line.slice(1));
+          } // ignore "\" line-ending markers
+        }
+        if (inHunk) hunks.push({ oldLines: curOld, newLines: curNew });
+
+        if (hunks.length === 0) {
+          return { ok: false, output: `No valid hunks found in diff for ${input.path}` };
+        }
+
+        let result = content;
+        let applied = 0;
+        const failed: string[] = [];
+
+        for (let h = 0; h < hunks.length; h++) {
+          const hunk = hunks[h];
+          const oldStr = hunk.oldLines.join("\n");
+          const newStr = hunk.newLines.join("\n");
+          if (!result.includes(oldStr)) {
+            failed.push(`hunk ${h + 1}: context not found`);
+            continue;
+          }
+          result = result.replace(oldStr, newStr);
+          applied++;
+        }
+
+        if (applied === 0) {
+          return { ok: false, output: `No hunks applied to ${input.path}. ${failed.join("; ")}` };
+        }
+
+        fs.writeFileSync(filePath, result, "utf-8");
+        const note = failed.length > 0 ? ` (${failed.length} failed: ${failed.join("; ")})` : "";
+        return {
+          ok: true,
+          output: `✏️ Applied ${applied}/${hunks.length} hunk(s) to ${input.path}${note}`,
+          fileChange: { path: input.path as string, action: "modified" },
         };
       }
 
@@ -940,6 +1022,7 @@ export function toolTitle(name: string, input: Record<string, unknown>): string 
     case "read_file": return `Read ${input.path}`;
     case "write_file": return `Write ${input.path}`;
     case "replace_in_file": return `Edit ${input.path}`;
+    case "apply_diff": return `Patch ${input.path}`;
     case "delete_file": return `Delete ${input.path}`;
     case "list_files": return `List ${input.path ?? "."}`;
     case "find_files": return `Find ${input.pattern}`;

@@ -119,6 +119,10 @@ export async function* streamAnthropic(
               if (block?.type === "tool_use") {
                 currentToolId = block.id;
                 toolInputs.set(block.id, { name: block.name ?? "", json: "" });
+                // Live preview — tool name is known before args finish streaming
+                if (block.name) {
+                  yield { type: "tool_use_preview", id: block.id, name: block.name };
+                }
               }
               break;
             }

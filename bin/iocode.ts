@@ -109,6 +109,8 @@ interface SessionState {
   sessionName?: string;
   /** File change journal — powers /undo */
   fileJournal: FileChangeEntry[];
+  /** Git stash-based checkpoints — powers /checkpoint + /restore */
+  checkpoints: Array<{ sha: string; label: string; createdAt: number }>;
   /** Map of provider → API key for all configured providers */
   connectedProviders: Map<ProviderId, string>;
 }
@@ -297,9 +299,21 @@ async function runOneShot(
   console.log(D(`  ${providerConfig.provider}  ·  ${providerConfig.model}  ·  ${projectRoot}`));
   console.log("");
 
+  // Build fallback providers from config keys (exclude active)
+  const fallbackProviders: ProviderConfig[] = Object.entries(config.keys ?? {})
+    .filter(([pid]) => pid !== providerConfig.provider)
+    .map(([pid, key]) => ({
+      provider: pid as ProviderId,
+      model: PROVIDER_REGISTRY[pid as ProviderId]?.defaultModel ?? "unknown",
+      apiKey: key,
+      baseUrl: config.baseUrl ?? PROVIDER_REGISTRY[pid as ProviderId]?.baseUrl,
+      temperature: providerConfig.temperature,
+    }));
+
   try {
     for await (const ev of runAgent({
       providerConfig,
+      fallbackProviders,
       projectRoot,
       toolDefs: TOOL_DEFS,
       systemPrompt: sysPrompt,
@@ -309,6 +323,9 @@ async function runOneShot(
       workspaceFiles,
     }, prompt)) {
       switch (ev.type) {
+        case "fallback":
+          console.log(Y(`  ↻ ${ev.fallbackFrom} → ${ev.fallbackTo} (transient error, retrying)`));
+          break;
         case "stream":
           if (ev.text) process.stdout.write(ev.text);
           break;
@@ -366,6 +383,7 @@ async function runRepl(
     planMode: false,
     agents,
     fileJournal: [],
+    checkpoints: [],
     connectedProviders: new Map(),
   };
 
@@ -610,6 +628,36 @@ function preSendEstimate(state: SessionState): string {
   return D(`  ↥ ~${estTokens.toLocaleString()} tokens est.  $${cost.total.toFixed(4)}`);
 }
 
+// ── Session Log Auto-Capture ──
+
+/**
+ * Append a session log entry to IODE.md. Opt-in: only writes if IODE.md
+ * contains a "## Session Log" marker (added by the user via /init or manually).
+ * Records timestamp, step count, and files changed — gives durable project
+ * memory without an LLM summarization call.
+ */
+function appendSessionLog(
+  projectRoot: string,
+  steps: number,
+  journal: FileChangeEntry[],
+): void {
+  const iodePath = path.join(projectRoot, "IODE.md");
+  try {
+    const content = fs.readFileSync(iodePath, "utf-8");
+    if (!content.includes("## Session Log")) return; // opt-in only
+    const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const recent = journal.slice(-10);
+    if (recent.length === 0) return;
+    const files = recent
+      .map(j => `  - ${j.action}: ${j.path}`)
+      .join("\n");
+    const entry = `\n- [${ts}] ${steps} steps, ${recent.length} files:\n${files}\n`;
+    fs.appendFileSync(iodePath, entry, "utf-8");
+  } catch {
+    // IODE.md missing or unreadable — skip silently
+  }
+}
+
 // ── Process Input ──
 
 async function processInput(
@@ -714,12 +762,25 @@ async function processInput(
 
   rl.pause();
 
+  // Build fallback providers from connected providers (exclude the active one)
+  // so the harness can failover on 429/503 without user intervention.
+  const fallbackProviders: ProviderConfig[] = Array.from(state.connectedProviders.entries())
+    .filter(([pid]) => pid !== turnProviderConfig.provider)
+    .map(([pid, key]) => ({
+      provider: pid,
+      model: PROVIDER_REGISTRY[pid]?.defaultModel ?? "unknown",
+      apiKey: key,
+      baseUrl: state.config.baseUrl ?? PROVIDER_REGISTRY[pid]?.baseUrl,
+      temperature: turnProviderConfig.temperature,
+    }));
+
   let currentText = "";
   let atLineStart = true; // track for box-left prefix on streamed text
 
   try {
     for await (const ev of runAgent({
       providerConfig: turnProviderConfig,
+      fallbackProviders,
       projectRoot: state.projectRoot,
       toolDefs: TOOL_DEFS,
       systemPrompt: sysPrompt,
@@ -729,6 +790,12 @@ async function processInput(
       workspaceFiles: state.workspaceFiles,
     }, promptText, state.conversation.length > 0 ? state.conversation : undefined)) {
       switch (ev.type) {
+        case "fallback":
+          if (currentText) { console.log(""); currentText = ""; }
+          console.log(ind(Y(`↻ ${ev.fallbackFrom} → ${ev.fallbackTo} (transient error, retrying)`)));
+          atLineStart = true;
+          break;
+
         case "stream":
           if (ev.text) {
             // Indent each new line to align with prompt text
@@ -784,6 +851,11 @@ async function processInput(
           console.log(ind(D(`┌─ ✓ ${ev.steps} steps  ↥${ev.totalInputTokens?.toLocaleString() ?? 0} ↧${ev.totalOutputTokens?.toLocaleString() ?? 0}`)));
           console.log(ind(D(`└─ ${ev.filesChanged} files changed  ${cost.label}`)));
 
+          // Auto-capture session log to IODE.md (opt-in via "## Session Log" marker)
+          if ((ev.filesChanged ?? 0) > 0) {
+            appendSessionLog(state.projectRoot, ev.steps ?? 0, state.fileJournal);
+          }
+
           if (state.conversation.length === 0) {
             state.conversation.push({
               role: "user",
@@ -835,7 +907,7 @@ async function handleCommand(
         ``,
         `  ${B("▸ Session")}     /model /models /provider /config /key /temp /clear /session /sessions /handoff /export`,
         `  ${B("▸ Context")}    /project /reload /compact /tokens /cost /init`,
-        `  ${B("▸ Code")}       /review /plan /todos /agents /lint /undo`,
+        `  ${B("▸ Code")}       /review /plan /todos /agents /lint /undo /checkpoint /restore`,
         `  ${B("▸ Files")}      /find /workspace /clone`,
         `  ${B("▸ Git")}        /diff /status /log /commit`,
         `  ${B("▸ Shell")}      ! cmd   !! cmd  (bang commands)`,
@@ -1543,6 +1615,52 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
       }
 
       if (undid > 0) lines.unshift(G(`  ↩ Undid ${undid} file change${undid > 1 ? "s" : ""}:`));
+      return lines.join("\n");
+    }
+
+    // ═══ Checkpoint / Restore (git stash-based) ═══
+    case "/checkpoint": {
+      const { execSync } = await import("node:child_process");
+      try {
+        const sha = execSync("git stash create", {
+          cwd: state.projectRoot, timeout: 5000, encoding: "utf-8",
+        }).trim();
+        if (!sha) return Y("  Nothing to checkpoint (clean working tree).");
+        const label = arg || `checkpoint ${state.checkpoints.length + 1}`;
+        state.checkpoints.push({ sha, label, createdAt: Date.now() });
+        return G(`  📌 Checkpoint saved: ${label} (${sha.slice(0, 8)})`);
+      } catch (e: any) {
+        return R(`  Checkpoint failed: ${(e.stderr ?? e.message).toString().split("\n")[0].slice(0, 200)}`);
+      }
+    }
+
+    case "/restore": {
+      if (state.checkpoints.length === 0) return D("  No checkpoints. Use /checkpoint to save one.");
+      const idx = arg ? Math.min(Math.max(parseInt(arg) - 1, 0), state.checkpoints.length - 1) : state.checkpoints.length - 1;
+      const cp = state.checkpoints[idx];
+      if (!cp) return R(`  Checkpoint ${arg} not found.`);
+
+      const { execSync } = await import("node:child_process");
+      try {
+        // Discard current uncommitted tracked changes, then apply the checkpoint
+        execSync("git checkout -- .", { cwd: state.projectRoot, timeout: 5000, encoding: "utf-8" });
+        execSync(`git stash apply ${cp.sha}`, { cwd: state.projectRoot, timeout: 10_000, encoding: "utf-8" });
+        // Clear the file journal since we reverted
+        state.fileJournal = [];
+        return G(`  ↩ Restored: ${cp.label} (${cp.sha.slice(0, 8)})`);
+      } catch (e: any) {
+        return R(`  Restore failed: ${(e.stderr ?? e.message).toString().split("\n")[0].slice(0, 200)}`);
+      }
+    }
+
+    case "/checkpoints": {
+      if (state.checkpoints.length === 0) return D("  No checkpoints. Use /checkpoint to save one.");
+      const lines = [``, `  ${C("Checkpoints")} ${D(`(${state.checkpoints.length})`)}`, ``];
+      state.checkpoints.forEach((cp, i) => {
+        const ts = new Date(cp.createdAt).toLocaleTimeString();
+        lines.push(`  ${i + 1}. ${cp.label} ${D(`(${cp.sha.slice(0, 8)} · ${ts})`)}`);
+      });
+      lines.push(``, `  ${D("Use /restore [n] to restore a checkpoint")}`);
       return lines.join("\n");
     }
 

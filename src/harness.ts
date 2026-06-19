@@ -25,6 +25,7 @@ import chalk from "chalk";
 
 export interface HarnessOptions {
   providerConfig: ProviderConfig;
+  fallbackProviders?: ProviderConfig[];
   projectRoot: string;
   toolDefs: ToolDef[];
   systemPrompt: string;
@@ -35,7 +36,7 @@ export interface HarnessOptions {
 }
 
 export interface HarnessEvent {
-  type: "stream" | "tool_call" | "tool_result" | "done" | "error";
+  type: "stream" | "tool_call" | "tool_result" | "done" | "error" | "fallback";
   text?: string;
   toolName?: string;
   toolTitle?: string;
@@ -47,6 +48,8 @@ export interface HarnessEvent {
   totalInputTokens?: number;
   totalOutputTokens?: number;
   error?: string;
+  fallbackFrom?: string;
+  fallbackTo?: string;
 }
 
 // ── Tool dependency classification ──
@@ -67,6 +70,7 @@ function classifyTool(name: string): ToolPhase {
       return "read";
     case "write_file":
     case "replace_in_file":
+    case "apply_diff":
     case "delete_file":
       return "write";
     case "run_command":
@@ -251,7 +255,7 @@ export async function* runAgent(
   userPrompt: string,
   conversation?: AgentMessage[],
 ): AsyncGenerator<HarnessEvent> {
-  const provider = createProvider(opts.providerConfig);
+  const providerConfigs = [opts.providerConfig, ...(opts.fallbackProviders ?? [])];
   const maxSteps = opts.maxSteps ?? 24;
   const sysPrompt = opts.systemPrompt;
 
@@ -274,47 +278,102 @@ export async function* runAgent(
   const dedupCache = new ToolDedupCache();
 
   for (step = 0; step < maxSteps; step++) {
-    // Call LLM
+    // Call LLM — with provider failover on immediate transient errors (429/503).
+    // Failover only happens if the error is the FIRST event (before any text/tools
+    // stream). Once real content flows, we commit to that provider.
     let hasToolCallsThisTurn = false;
     const toolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+    const previewedTools = new Set<string>();
     let assistantText = "";
 
-    try {
-      for await (const ev of provider.streamChat(sysPrompt, messages, opts.toolDefs)) {
-        switch (ev.type) {
-          case "text_delta":
-            assistantText += ev.text;
-            yield { type: "stream", text: ev.text };
-            break;
+    let streamDone = false;
+    for (let pi = 0; pi < providerConfigs.length && !streamDone; pi++) {
+      const tryProvider = createProvider(providerConfigs[pi]);
+      let gotRealEvent = false;
+      let failover = false;
 
-          case "tool_use":
-            // Skip duplicate tool calls within same turn
-            if (dedupCache.get(ev.name, ev.input)) continue;
+      try {
+        for await (const ev of tryProvider.streamChat(sysPrompt, messages, opts.toolDefs)) {
+          // Failover: transient error as the very first event → try next provider
+          if (ev.type === "error" && !gotRealEvent) {
+            const msg = ev.message.toLowerCase();
+            const transient = msg.includes("429") || msg.includes("503") || msg.includes("502")
+              || msg.includes("rate limit") || msg.includes("overloaded")
+              || msg.includes("capacity") || msg.includes("timeout");
+            if (transient && pi < providerConfigs.length - 1) {
+              failover = true;
+              yield {
+                type: "fallback",
+                fallbackFrom: providerConfigs[pi].provider,
+                fallbackTo: providerConfigs[pi + 1].provider,
+              };
+              break;
+            }
+          }
+          gotRealEvent = true;
 
-            toolCalls.push({ id: ev.id, name: ev.name, input: ev.input });
-            hasToolCallsThisTurn = true;
-            yield {
-              type: "tool_call",
-              toolName: ev.name,
-              toolTitle: toolTitle(ev.name, ev.input),
-            };
-            break;
+          switch (ev.type) {
+            case "text_delta":
+              assistantText += ev.text;
+              yield { type: "stream", text: ev.text };
+              break;
 
-          case "usage":
-            totalInputTokens += ev.inputTokens;
-            totalOutputTokens += ev.outputTokens;
-            break;
+            case "tool_use_preview":
+              // Live preview — tool name known, args still streaming. Show the
+              // call line early so the user sees activity during long streams.
+              if (!previewedTools.has(ev.id)) {
+                previewedTools.add(ev.id);
+                yield { type: "tool_call", toolName: ev.name, toolTitle: ev.name };
+              }
+              break;
 
-          case "stop":
-            break;
+            case "tool_use":
+              // Skip duplicate tool calls within same turn
+              if (dedupCache.get(ev.name, ev.input)) continue;
 
-          case "error":
-            yield { type: "error", error: ev.message };
-            return;
+              toolCalls.push({ id: ev.id, name: ev.name, input: ev.input });
+              hasToolCallsThisTurn = true;
+              // Only yield tool_call if we didn't already show a preview
+              if (!previewedTools.has(ev.id)) {
+                yield {
+                  type: "tool_call",
+                  toolName: ev.name,
+                  toolTitle: toolTitle(ev.name, ev.input),
+                };
+              }
+              break;
+
+            case "usage":
+              totalInputTokens += ev.inputTokens;
+              totalOutputTokens += ev.outputTokens;
+              break;
+
+            case "stop":
+              break;
+
+            case "error":
+              yield { type: "error", error: ev.message };
+              return;
+          }
+        }
+      } catch (e: any) {
+        if (!gotRealEvent && pi < providerConfigs.length - 1) {
+          failover = true;
+          yield {
+            type: "fallback",
+            fallbackFrom: providerConfigs[pi].provider,
+            fallbackTo: providerConfigs[pi + 1].provider,
+          };
+        } else {
+          yield { type: "error", error: `Provider error: ${e.message}` };
+          return;
         }
       }
-    } catch (e: any) {
-      yield { type: "error", error: `Provider error: ${e.message}` };
+      streamDone = !failover;
+    }
+
+    if (!streamDone) {
+      yield { type: "error", error: "All providers failed (transient errors on every attempt)" };
       return;
     }
 

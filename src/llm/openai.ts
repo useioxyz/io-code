@@ -154,6 +154,7 @@ async function* parseOpenAIStream(
   const decoder = new TextDecoder();
   let buffer = "";
   const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+  const previewed = new Set<number>();
 
   try {
     while (true) {
@@ -216,6 +217,11 @@ async function* parseOpenAIStream(
               if (tc.function?.name) existing.name += tc.function.name;
               if (tc.function?.arguments) existing.args += tc.function.arguments;
               toolCalls.set(idx, existing);
+              // Emit live preview once we know the tool id + name
+              if (!previewed.has(idx) && existing.name && existing.id) {
+                previewed.add(idx);
+                yield { type: "tool_use_preview", id: existing.id, name: existing.name };
+              }
             }
           }
         } catch {
