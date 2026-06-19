@@ -6,7 +6,6 @@ import type {
   ProviderConfig,
   ProviderEvent,
 } from "./types.js";
-import { parseOpenAISSE } from "./sse.js";
 
 function agentToOpenAIMessages(
   messages: AgentMessage[],

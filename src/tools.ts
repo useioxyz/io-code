@@ -3,7 +3,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { glob } from "glob";
 import { parse, type HTMLElement } from "node-html-parser";
 
@@ -31,6 +31,97 @@ export interface ToolDef {
     }>;
     required?: string[];
   };
+}
+
+/**
+ * Promisified spawn — runs a command with array args (no shell, injection-safe).
+ * Resolves with collected stdout/stderr and exit code. Never throws — callers
+ * inspect exitCode. Non-blocking: yields to the event loop between chunks, so
+ * concurrent tool calls in the harness actually run in parallel.
+ */
+function execFileAsync(
+  command: string,
+  args: string[],
+  opts: { cwd: string; timeout: number; maxBuffer?: number },
+): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+  return new Promise((resolve) => {
+    const maxBuf = opts.maxBuffer ?? 500_000;
+    const child = spawn(command, args, {
+      cwd: opts.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: process.env,
+    });
+    let stdout = "";
+    let stderr = "";
+    let killed = false;
+    const timer = setTimeout(() => { killed = true; child.kill("SIGTERM"); }, opts.timeout * 1000);
+
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+      if (stdout.length > maxBuf) { killed = true; child.kill("SIGTERM"); }
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString();
+      if (stderr.length > maxBuf) { killed = true; child.kill("SIGTERM"); }
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (killed && stdout.length > maxBuf) {
+        stdout = stdout.slice(0, maxBuf) + `\n... (truncated at ${maxBuf} bytes)`;
+      }
+      resolve({ stdout, stderr, exitCode: code });
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      stderr += err.message;
+      resolve({ stdout, stderr, exitCode: -1 });
+    });
+  });
+}
+
+/**
+ * Async shell exec — for run_command which intentionally runs arbitrary shell
+ * strings (pipes, redirects, &&). Non-blocking but DOES use a shell, so only
+ * use for trusted/explicit commands, never for interpolating user input.
+ */
+function execShellAsync(
+  command: string,
+  opts: { cwd: string; timeout: number; maxBuffer?: number },
+): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+  return new Promise((resolve) => {
+    const maxBuf = opts.maxBuffer ?? 500_000;
+    const child = spawn(command, {
+      cwd: opts.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: true,
+      env: process.env,
+    });
+    let stdout = "";
+    let stderr = "";
+    let killed = false;
+    const timer = setTimeout(() => { killed = true; child.kill("SIGTERM"); }, opts.timeout * 1000);
+
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString();
+      if (stdout.length > maxBuf) { killed = true; child.kill("SIGTERM"); }
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString();
+      if (stderr.length > maxBuf) { killed = true; child.kill("SIGTERM"); }
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (killed && stdout.length > maxBuf) {
+        stdout = stdout.slice(0, maxBuf) + `\n... (truncated at ${maxBuf} bytes)`;
+      }
+      resolve({ stdout, stderr, exitCode: code });
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      stderr += err.message;
+      resolve({ stdout, stderr, exitCode: -1 });
+    });
+  });
 }
 
 // ── Tool Definitions ──
@@ -467,35 +558,21 @@ export async function executeTool(
           }
         }
 
-        try {
-          const timeout = ((input.timeout as number) ?? 30) * 1000;
-          const output = execSync(command, {
-            cwd: projectRoot,
-            timeout,
-            maxBuffer: 500_000,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
-          });
+        const timeout = (input.timeout as number) ?? 30;
+        const result = await execShellAsync(command, { cwd: projectRoot, timeout, maxBuffer: 500_000 });
+        const combined = result.stdout + result.stderr;
+        const truncated = combined.length > 6000
+          ? combined.slice(0, 6000) + `\n... (${combined.length - 6000} more chars)`
+          : combined;
 
-          const truncated = output.length > 6000
-            ? output.slice(0, 6000) + `\n... (${output.length - 6000} more chars)`
-            : output;
-
-          return {
-            ok: true,
-            output: truncated || "(no output)",
-            verifies: true,
-          };
-        } catch (e: any) {
-          const stderr = e.stderr ?? "";
-          const stdout = e.stdout ?? "";
-          const combined = (stdout + stderr).slice(0, 3000) || e.message;
-          return {
-            ok: false,
-            output: `❌ Command failed (exit ${e.status ?? 1}):\n${combined}`,
-            verifies: true,
-          };
+        if (result.exitCode === 0) {
+          return { ok: true, output: truncated || "(no output)", verifies: true };
         }
+        return {
+          ok: false,
+          output: `❌ Command failed (exit ${result.exitCode}):\n${(combined || "").slice(0, 3000)}`,
+          verifies: true,
+        };
       }
 
       case "run_tests": {
@@ -527,26 +604,12 @@ export async function executeTool(
 
         if (filter) cmd += ` -t "${filter}"`;
 
-        try {
-          const output = execSync(cmd, {
-            cwd: projectRoot,
-            timeout: 120_000,
-            maxBuffer: 500_000,
-            encoding: "utf-8",
-          });
-          return {
-            ok: true,
-            output: `🧪 Tests passed\n${output.slice(0, 4000)}`,
-            verifies: true,
-          };
-        } catch (e: any) {
-          const out = (e.stdout ?? "") + (e.stderr ?? "");
-          return {
-            ok: false,
-            output: `🧪 Tests failed\n${out.slice(0, 4000)}`,
-            verifies: true,
-          };
+        const result = await execShellAsync(cmd, { cwd: projectRoot, timeout: 120, maxBuffer: 500_000 });
+        const out = result.stdout + result.stderr;
+        if (result.exitCode === 0) {
+          return { ok: true, output: `🧪 Tests passed\n${out.slice(0, 4000)}`, verifies: true };
         }
+        return { ok: false, output: `🧪 Tests failed\n${out.slice(0, 4000)}`, verifies: true };
       }
 
       case "web_search": {
@@ -812,80 +875,55 @@ export async function executeTool(
 
       case "git_diff": {
         const target = input.target as string | undefined;
-        let args = "diff -- .";
-        if (target === "staged" || target === "cached") args = "diff --cached -- .";
-        else if (target && target.includes("..")) args = `diff ${target}`;
-        else if (target) args = `diff ${target} -- .`;
+        // Array args — no shell, injection-safe even with user-provided target.
+        const args: string[] = ["diff"];
+        if (target === "staged" || target === "cached") args.push("--cached", "--", ".");
+        else if (target && target.includes("..")) args.push(target);
+        else if (target) args.push(target, "--", ".");
+        else args.push("--", ".");
 
-        try {
-          const output = execSync(`git ${args}`, {
-            cwd: projectRoot,
-            timeout: 10_000,
-            maxBuffer: 500_000,
-            encoding: "utf-8",
-          });
-          return {
-            ok: true,
-            output: output.slice(0, 8000) || "(no changes)",
-          };
-        } catch (e: any) {
-          return { ok: false, output: e.stderr?.slice(0, 1000) ?? e.message };
+        const result = await execFileAsync("git", args, { cwd: projectRoot, timeout: 10, maxBuffer: 500_000 });
+        if (result.exitCode === 0) {
+          return { ok: true, output: result.stdout.slice(0, 8000) || "(no changes)" };
         }
+        return { ok: false, output: result.stderr.slice(0, 1000) || `git diff failed (exit ${result.exitCode})` };
       }
 
       case "git_status": {
-        try {
-          const output = execSync("git status --short", {
-            cwd: projectRoot,
-            timeout: 5000,
-            encoding: "utf-8",
-          });
-          return {
-            ok: true,
-            output: output || "(clean working tree)",
-          };
-        } catch (e: any) {
-          return { ok: false, output: e.stderr?.slice(0, 1000) ?? e.message };
+        const result = await execFileAsync("git", ["status", "--short"], { cwd: projectRoot, timeout: 5, maxBuffer: 500_000 });
+        if (result.exitCode === 0) {
+          return { ok: true, output: result.stdout || "(clean working tree)" };
         }
+        return { ok: false, output: result.stderr.slice(0, 1000) || `git status failed (exit ${result.exitCode})` };
       }
 
       case "git_log": {
         const count = (input.count as number) ?? 10;
-        try {
-          const output = execSync(
-            `git log --oneline -n ${Math.min(count, 50)} --decorate`,
-            { cwd: projectRoot, timeout: 5000, encoding: "utf-8" },
-          );
-          return { ok: true, output: output || "(no commits)" };
-        } catch (e: any) {
-          return { ok: false, output: e.stderr?.slice(0, 1000) ?? e.message };
+        const result = await execFileAsync("git", ["log", "--oneline", "-n", String(Math.min(count, 50)), "--decorate"], { cwd: projectRoot, timeout: 5, maxBuffer: 500_000 });
+        if (result.exitCode === 0) {
+          return { ok: true, output: result.stdout || "(no commits)" };
         }
+        return { ok: false, output: result.stderr.slice(0, 1000) || `git log failed (exit ${result.exitCode})` };
       }
 
       case "git_commit": {
         const message = input.message as string;
         const files = input.files as string[] | undefined;
 
-        try {
-          if (files && files.length > 0) {
-            execSync(`git add ${files.map(f => `"${f}"`).join(" ")}`, {
-              cwd: projectRoot, timeout: 5000, encoding: "utf-8",
-            });
-          } else {
-            execSync("git add -A", {
-              cwd: projectRoot, timeout: 5000, encoding: "utf-8",
-            });
-          }
-
-          const output = execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
-            cwd: projectRoot, timeout: 10_000, encoding: "utf-8",
-          });
-
-          return { ok: true, output: `✅ Committed: ${output.trim()}` };
-        } catch (e: any) {
-          const msg = e.stdout ?? e.stderr ?? e.message;
-          return { ok: false, output: `❌ Commit failed: ${msg.slice(0, 1000)}` };
+        // Array args — injection-safe. Commit message passed as a single arg,
+        // no shell interpolation of backticks/$()/; in the message.
+        const addArgs = files && files.length > 0 ? ["add", ...files] : ["add", "-A"];
+        const addResult = await execFileAsync("git", addArgs, { cwd: projectRoot, timeout: 5, maxBuffer: 500_000 });
+        if (addResult.exitCode !== 0) {
+          return { ok: false, output: `❌ git add failed: ${addResult.stderr.slice(0, 1000)}` };
         }
+
+        const commitResult = await execFileAsync("git", ["commit", "-m", message], { cwd: projectRoot, timeout: 10, maxBuffer: 500_000 });
+        if (commitResult.exitCode !== 0) {
+          const msg = (commitResult.stdout + commitResult.stderr).slice(0, 1000);
+          return { ok: false, output: `❌ Commit failed: ${msg}` };
+        }
+        return { ok: true, output: `✅ Committed: ${commitResult.stdout.trim()}` };
       }
 
       default:

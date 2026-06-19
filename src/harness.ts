@@ -10,6 +10,7 @@
 //   - Staged execution: reads → writes → commands (safe ordering)
 
 import type { AgentMessage, ContentBlock, ToolUseBlock, ProviderEvent } from "./llm/types.js";
+import { PROVIDER_PRICING } from "./llm/types.js";
 import { createProvider, type LLMProvider, type ProviderConfig } from "./llm/index.js";
 import {
   executeTool,
@@ -473,18 +474,7 @@ export function estimateCost(
   inputTokens: number,
   outputTokens: number,
 ): { input: number; output: number; total: number; label: string } {
-  // Simplified pricing
-  const rates: Record<string, { input: number; output: number }> = {
-    "claude-opus-4-8": { input: 15, output: 75 },
-    "claude-sonnet-4-6": { input: 3, output: 15 },
-    "claude-haiku-4-5": { input: 0.8, output: 4 },
-    "gpt-5.1": { input: 5, output: 20 },
-    "gpt-5.1-mini": { input: 0.5, output: 2 },
-    "deepseek-v4-pro": { input: 0.14, output: 0.28 },
-    "deepseek-v4-flash": { input: 0.07, output: 0.14 },
-  };
-
-  const rate = rates[model] ?? { input: 0, output: 0 };
+  const rate = PROVIDER_PRICING[model] ?? { input: 0, output: 0 };
   const inputCost = (inputTokens / 1_000_000) * rate.input;
   const outputCost = (outputTokens / 1_000_000) * rate.output;
   const total = inputCost + outputCost;
@@ -495,4 +485,16 @@ export function estimateCost(
   else label = `$${total.toFixed(4)}`;
 
   return { input: inputCost, output: outputCost, total, label };
+}
+
+/**
+ * Price per 1M tokens for a model — used for model picker display.
+ * Returns null if the model has no pricing data (free/unknown).
+ */
+export function pricePerMillion(
+  model: string,
+): { input: number; output: number } | null {
+  const rate = PROVIDER_PRICING[model];
+  if (!rate) return null;
+  return { input: rate.input, output: rate.output };
 }

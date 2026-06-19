@@ -15,6 +15,7 @@ import {
   compactConversation,
   estimateTokens,
   estimateCost,
+  pricePerMillion,
 } from "../src/harness.js";
 import { TOOL_DEFS, executeTool } from "../src/tools.js";
 import { buildSystemPrompt, buildCompactPrompt } from "../src/prompts.js";
@@ -675,12 +676,32 @@ async function processInput(
     state.pendingReview = undefined;
   }
 
-  const sysPrompt = buildSystemPrompt(
+  // ── @agent dispatch ──
+  // Detect @agent-name mentions in the prompt, inject the agent's prompt
+  // into the system prompt, and override the model for this turn.
+  const agentMentions = resolveAgentMentions(promptText, state.agents);
+  let turnProviderConfig = state.providerConfig;
+  if (agentMentions.length > 0) {
+    const withModel = agentMentions.find(a => a.model);
+    if (withModel?.model) {
+      turnProviderConfig = {
+        ...state.providerConfig,
+        model: withModel.model,
+      };
+    }
+    console.log(ind(C(`◇ @${agentMentions.map(a => a.name).join(" @")}`) +
+      (withModel?.model ? D(`  → ${withModel.model}`) : "")));
+  }
+
+  const baseSysPrompt = buildSystemPrompt(
     TOOL_DEFS,
     state.projectRoot,
     state.contextFiles,
     state.workspaceFiles,
   );
+  const sysPrompt = agentMentions.length > 0
+    ? `${baseSysPrompt}\n\n## Invoked Agents\n\nYou have been invoked with the following agent persona(s). Adopt their perspective and follow their instructions in addition to your base role.\n\n${agentMentions.map(a => `### Agent: @${a.name}\n${a.prompt}`).join("\n\n")}`
+    : baseSysPrompt;
 
   rl.pause();
 
@@ -689,12 +710,12 @@ async function processInput(
 
   try {
     for await (const ev of runAgent({
-      providerConfig: state.providerConfig,
+      providerConfig: turnProviderConfig,
       projectRoot: state.projectRoot,
       toolDefs: TOOL_DEFS,
       systemPrompt: sysPrompt,
       maxSteps: state.config.maxSteps ?? 24,
-      temperature: state.providerConfig.temperature,
+      temperature: turnProviderConfig.temperature,
       contextFiles: state.contextFiles,
       workspaceFiles: state.workspaceFiles,
     }, promptText, state.conversation.length > 0 ? state.conversation : undefined)) {
@@ -830,9 +851,9 @@ async function handleCommand(
         ];
         for (const m of presets) {
           const active = m.id === state.providerConfig.model ? G("●") : "○";
-          const priceInfo = estimateCost(state.providerConfig.provider, m.id, 0, 0);
-          const priceStr = priceInfo.total === 0 ? "free" : `$${priceInfo.total.toFixed(2)}/M out`;
-          lines.push(`  ${active} ${m.name} ${D(`(${m.id})`)}  ${D(m.description)}  ${D(priceStr)}`);
+          const pm = pricePerMillion(m.id);
+          const priceStr = pm ? `$${pm.output.toFixed(2)}/M out · $${pm.input.toFixed(2)}/M in` : D("free");
+          lines.push(`  ${active} ${m.name} ${D(`(${m.id})`)}  ${D(m.description)}  ${priceStr}`);
         }
         return lines.join("\n") + "\n";
       }
@@ -873,9 +894,9 @@ async function handleCommand(
         lines.push(`  ${isActive ? G("▶") : C("▹")} ${C(meta.name)} ${D(`(${pid})`)}`);
         for (const m of presets) {
           const active = m.id === state.providerConfig?.model && isActive ? G("●") : "○";
-          const priceInfo = estimateCost(pid, m.id, 0, 0);
-          const priceStr = priceInfo.total === 0 ? "free" : `$${priceInfo.total.toFixed(2)}/M out`;
-          lines.push(`    ${active} ${m.name} ${D(`(${m.id})`)}  ${D(priceStr)}`);
+          const pm = pricePerMillion(m.id);
+          const priceStr = pm ? `$${pm.output.toFixed(2)}/M out` : D("free");
+          lines.push(`    ${active} ${m.name} ${D(`(${m.id})`)}  ${priceStr}`);
         }
         lines.push(``);
       }
@@ -1620,6 +1641,35 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
     default:
       return D(`  Unknown command: ${cmd}. Use /help to see all commands.`);
   }
+}
+
+// ── @agent Reference Resolution ──
+
+/**
+ * Find @agent-name mentions in the user prompt and return matching AgentDefs.
+ * Matches by exact name or prefix. Deduplicates. Preserves mention order.
+ * Only matches names that exist in the loaded agents list — random @mentions
+ * (e.g. @username) are ignored.
+ */
+function resolveAgentMentions(
+  text: string,
+  agents: AgentDef[],
+): AgentDef[] {
+  if (agents.length === 0) return [];
+  const agentNames = new Set(agents.map(a => a.name.toLowerCase()));
+  const re = /(?:^|\s)@([a-zA-Z][a-zA-Z0-9_-]*)(?=\s|$)/g;
+  const seen = new Set<string>();
+  const matched: AgentDef[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const name = m[1].toLowerCase();
+    if (agentNames.has(name) && !seen.has(name)) {
+      seen.add(name);
+      const agent = agents.find(a => a.name.toLowerCase() === name);
+      if (agent) matched.push(agent);
+    }
+  }
+  return matched;
 }
 
 // ── @file Reference Expansion ──
