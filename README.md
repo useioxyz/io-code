@@ -12,15 +12,20 @@
 
 ## Features
 
-- **Real filesystem tools** — read, write, edit, delete, search, git operations
+- **Real filesystem tools** — read, write, edit, patch (unified diff), delete, search, git operations
 - **Multi-provider BYOK** — Anthropic, OpenAI, DeepSeek, Groq, OpenRouter, Codex (OAuth), OpenCode, custom
-- **Parallel tool execution** — dependency graph + concurrent tool calls + automatic retry
+- **Provider failover** — auto-retries with the next connected provider on 429/503
+- **Parallel tool execution** — dependency graph + concurrent async tool calls + automatic retry
+- **Streaming tool preview** — see tool calls start the moment the model emits them
 - **Smart linting** — auto-detect and run ESLint, Biome, Prettier, Ruff, Oxlint
-- **Undo support** — git-based per-file revert with `/undo [n]`
+- **Undo + checkpoint support** — `/undo` for file ops, `/checkpoint` + `/restore` for full working-tree snapshots
 - **Autonomous agent loop** — plan → act → observe → verify
-- **Slash commands** — /model, /provider, /compact, /clear, /config, /diff, /status, /commit, /lint, /undo, /clone
+- **Auto-compact** — conversation compacts automatically when context grows too large
+- **`@agent` dispatch** — invoke sub-agents by mentioning `@agent-name` in your prompt
+- **Slash commands** — /model, /provider, /compact, /clear, /config, /diff, /status, /commit, /lint, /undo, /checkpoint, /restore, /clone
 - **Context auto-loading** — AGENTS.md, CLAUDE.md, .cursorrules, IODE.md
 - **Project intelligence** — auto-detects framework, package manager, test runner
+- **Session log** — auto-captures file changes to IODE.md (opt-in)
 - **Compact prompt mode** — save tokens on simple tasks
 - **Privacy-first** — never reads .env files, built on I/O Protocol
 
@@ -82,6 +87,9 @@ io -p anthropic -m claude-opus-4-8 "Refactor"
 | `/clone <url>` | Clone website locally (HTML+CSS+JS+assets) |
 | `/lint [--fix]` | Run linters (auto-detect: ESLint, Biome, Prettier, Ruff, Oxlint) |
 | `/undo [n]` | Undo last N file changes (git-based revert) |
+| `/checkpoint [label]` | Snapshot the working tree (git stash create) |
+| `/restore [n]` | Restore a checkpoint (discards current changes first) |
+| `/checkpoints` | List saved checkpoints |
 | `/workspace` | List workspace files |
 | `/reload` | Reload context files |
 | `/quit` | Exit |
@@ -113,6 +121,28 @@ IO Code auto-loads project context files from the working directory:
 - `.cursorrules`
 - `IODE.md` (I/O ecosystem specific)
 - `README.md` (trimmed to first 300 lines)
+
+## Sub-Agents
+
+Define specialized agents in `.iocode/agents/<name>.md` (or `~/.iocode/agents/`):
+
+```markdown
+---
+name: code-reviewer
+description: Security-focused code reviewer
+model: claude-opus-4-8
+---
+
+You are a senior security engineer. Analyze code for...
+```
+
+Invoke by mentioning `@agent-name` in your prompt — the agent's prompt is
+injected into the system prompt and its model overrides the session model
+for that turn:
+
+```
+io> @code-reviewer review src/auth.ts for vulnerabilities
+```
 
 ## Coming Soon
 
