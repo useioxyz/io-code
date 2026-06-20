@@ -125,16 +125,28 @@ function execShellAsync(
 }
 
 // ── HTML → Markdown converter ──
-// Strips noise (script/style/nav/footer), converts semantic elements to markdown.
+// Strips noise (script/style/nav/footer/aside), converts semantic elements to markdown.
+// Resolves relative URLs against baseUrl when provided.
 
-function htmlToMarkdown(html: string): string {
+function htmlToMarkdown(html: string, baseUrl?: string): string {
   const root = parse(html);
+  const baseOrigin = baseUrl ? new URL(baseUrl).origin : "";
+
+  // Resolve a relative URL to absolute
+  function resolveUrl(url: string): string {
+    if (!url || !baseOrigin || url.startsWith("http") || url.startsWith("data:") || url.startsWith("mailto:")) return url;
+    try { return new URL(url, baseUrl!).href; } catch { return url; }
+  }
+
   // Remove non-content elements
-  for (const tag of ["script", "style", "noscript", "svg", "nav", "footer", "header", "iframe"]) {
+  for (const tag of ["script", "style", "noscript", "svg", "nav", "footer", "header", "iframe", "aside"]) {
     for (const el of root.querySelectorAll(tag)) el.remove();
   }
-  // Remove common ad/analytics containers
-  for (const el of root.querySelectorAll("[role='banner'], [role='navigation'], [role='contentinfo']")) el.remove();
+  // Remove common ad/analytics/sidebar containers
+  for (const el of root.querySelectorAll(
+    "[role='banner'], [role='navigation'], [role='contentinfo'], [role='complementary'], [role='search'], " +
+    ".sidebar, .toc, .table-of-contents, .breadcrumbs, .cookie-banner, .ad, .adsbygoogle"
+  )) el.remove();
 
   const lines: string[] = [];
   const visited = new WeakSet();
@@ -160,8 +172,16 @@ function htmlToMarkdown(html: string): string {
       case "blockquote": lines.push(`\n> ${text}\n`); return;
       case "pre": {
         const code = node.querySelector("code");
+        const codeEl = code ?? node;
+        // Strip all inner tags (syntax-highlight spans) to get clean code text
+        const rawInner = codeEl.innerHTML ?? "";
+        const cleanText = rawInner
+          .replace(/<[^>]+>/g, "")
+          .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+          .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
+          .replace(/&nbsp;/g, " ").trim();
         const lang = code?.getAttribute("class")?.match(/language-(\w+)/)?.[1] ?? "";
-        lines.push(`\n\`\`\`${lang}\n${code?.textContent ?? text}\n\`\`\`\n`);
+        lines.push(`\n\`\`\`${lang}\n${cleanText}\n\`\`\`\n`);
         return;
       }
       case "code": {
@@ -199,8 +219,9 @@ function htmlToMarkdown(html: string): string {
       }
       case "a": {
         const href = node.getAttribute("href") ?? "";
+        const resolved = resolveUrl(href);
         if (text && href && !href.startsWith("#")) {
-          lines.push(`[${text}](${href})`);
+          lines.push(`[${text}](${resolved})`);
         } else if (text) {
           lines.push(text);
         }
@@ -209,7 +230,7 @@ function htmlToMarkdown(html: string): string {
       case "img": {
         const src = node.getAttribute("src") ?? "";
         const alt = node.getAttribute("alt") ?? "";
-        if (src) lines.push(`![${alt}](${src})`);
+        if (src) lines.push(`![${alt}](${resolveUrl(src)})`);
         return;
       }
     }
@@ -461,7 +482,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: "web_fetch",
-    description: "Fetch a URL and convert HTML to markdown. Returns clean text with headings, links, lists, and code blocks. Handles JSON and plain text too.",
+    description: "Fetch a URL and convert HTML to clean markdown. Extracts metadata (title, description, author, date, og:image). Strips sidebar/nav/aside noise, cleans syntax-highlighted code blocks, resolves relative→absolute URLs. Handles JSON and plain text too. Truncates at 20KB.",
     input_schema: {
       type: "object",
       properties: {
@@ -953,8 +974,8 @@ export async function executeTool(
             try {
               const parsed = JSON.parse(rawText);
               const pretty = JSON.stringify(parsed, null, 2);
-              const truncated = pretty.length > 12000
-                ? pretty.slice(0, 12000) + `\n\n... (${pretty.length - 12000} more chars)`
+              const truncated = pretty.length > 20000
+                ? pretty.slice(0, 20000) + `\n\n... (${pretty.length - 20000} more chars)`
                 : pretty;
               return { ok: true, output: `📄 ${finalUrl} (JSON)\n\n\`\`\`json\n${truncated}\n\`\`\`` };
             } catch {
@@ -964,8 +985,8 @@ export async function executeTool(
 
           // Plain text → return as-is
           if (contentType.startsWith("text/plain")) {
-            const truncated = rawText.length > 12000
-              ? rawText.slice(0, 12000) + `\n\n... (${rawText.length - 12000} more chars)`
+            const truncated = rawText.length > 20000
+              ? rawText.slice(0, 20000) + `\n\n... (${rawText.length - 20000} more chars)`
               : rawText;
             return { ok: true, output: `📄 ${finalUrl} (text)\n\n${truncated}` };
           }
@@ -973,14 +994,36 @@ export async function executeTool(
           // HTML → convert to markdown
           if (contentType.includes("text/html") || contentType.includes("xhtml") || rawText.trimStart().startsWith("<")) {
             onProgress?.(`Converting HTML→markdown (${(rawText.length / 1024).toFixed(0)}KB)...`);
-            const markdown = htmlToMarkdown(rawText);
-            const truncated = markdown.length > 12000
-              ? markdown.slice(0, 12000) + `\n\n... (${markdown.length - 12000} more chars)`
-              : markdown;
+            const markdown = htmlToMarkdown(rawText, finalUrl);
+
+            // Extract metadata
             const titleMatch = rawText.match(/<title[^>]*>(.*?)<\/title>/i);
             const title = titleMatch?.[1]?.trim() ?? "";
-            const header = title ? `📄 ${title}\n   ${finalUrl}\n` : `📄 ${finalUrl}\n`;
-            return { ok: true, output: `${header}\n${truncated}` };
+            const descMatch = rawText.match(/<meta\s+(?:name|property)=["'](?:description|og:description)["']\s+content=["']([^"']*)["']/i);
+            const authorMatch = rawText.match(/<meta\s+name=["']author["']\s+content=["']([^"']*)["']/i);
+            const dateMatch = rawText.match(/<meta\s+(?:name|property)=["'](?:article:published_time|date|publish_date)["']\s+content=["']([^"']*)["']/i);
+            const ogImageMatch = rawText.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']*)["']/i);
+
+            const desc = descMatch?.[1]?.trim() ?? "";
+            const author = authorMatch?.[1]?.trim() ?? "";
+            const date = dateMatch?.[1]?.trim() ?? "";
+            const ogImage = ogImageMatch?.[1]?.trim() ?? "";
+
+            // Build rich header
+            const headerParts: string[] = [`📄 ${title || "Untitled"}`, `   ${finalUrl}`];
+            if (desc) headerParts.push(`   ${desc.slice(0, 200)}`);
+            const metaParts: string[] = [];
+            if (author) metaParts.push(`✍️ ${author}`);
+            if (date) metaParts.push(`📅 ${date}`);
+            if (ogImage) metaParts.push(`🖼️ ${ogImage}`);
+            if (metaParts.length) headerParts.push(`   ${metaParts.join("  ")}`);
+
+            const header = headerParts.join("\n");
+
+            const truncated = markdown.length > 20000
+              ? markdown.slice(0, 20000) + `\n\n... (${markdown.length - 20000} more chars)`
+              : markdown;
+            return { ok: true, output: `${header}\n\n${truncated}` };
           }
 
           // Fallback: return raw text
