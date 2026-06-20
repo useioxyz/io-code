@@ -311,6 +311,10 @@ async function runOneShot(
       temperature: providerConfig.temperature,
     }));
 
+  // Tool execution spinner — shows loading animation while tools run
+  let toolSpinner: ReturnType<typeof ora> | null = null;
+  let pendingToolCount = 0;
+
   try {
     for await (const ev of runAgent({
       providerConfig,
@@ -328,26 +332,39 @@ async function runOneShot(
           console.log(Y(`  ↻ ${ev.fallbackFrom} → ${ev.fallbackTo} (transient error, retrying)`));
           break;
         case "stream":
+          if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
           if (ev.text) process.stdout.write(ev.text);
           break;
         case "tool_call":
           console.log(`\n${C("◇")} ${ev.toolTitle}`);
+          pendingToolCount++;
+          if (!toolSpinner) {
+            toolSpinner = ora(D(`Running ${ev.toolTitle}...`)).start();
+          }
           break;
         case "tool_result":
+          if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
           const icon = ev.toolOk ? G("✓") : R("✗");
           console.log(`${D("┆")} ${icon} ${D((ev.toolOutput ?? "").slice(0, 200))}`);
+          pendingToolCount--;
+          if (pendingToolCount > 0) {
+            toolSpinner = ora(D(`Running ${pendingToolCount} more tool${pendingToolCount > 1 ? "s" : ""}...`)).start();
+          }
           break;
         case "done":
+          if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
           console.log(D(`\n┌─ ✓ ${ev.steps} steps  ↥${ev.totalInputTokens?.toLocaleString() ?? 0} ↧${ev.totalOutputTokens?.toLocaleString() ?? 0}`));
           const cost = estimateCost(providerConfig.provider, providerConfig.model, ev.totalInputTokens ?? 0, ev.totalOutputTokens ?? 0);
           console.log(D(`└─ ${ev.filesChanged} files changed  ${cost.label}`));
           break;
         case "error":
+          if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
           console.error(R(`\n  Error: ${ev.error}`));
           break;
       }
     }
   } catch (e: any) {
+    if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
     console.error(R(`\n  Fatal: ${e.message}`));
     process.exit(1);
   }
@@ -834,6 +851,10 @@ Start by issuing your first batch of web_search calls NOW.`;
   let currentText = "";
   let atLineStart = true; // track for box-left prefix on streamed text
 
+  // Tool execution spinner — shows loading animation while tools run
+  let toolSpinner: ReturnType<typeof ora> | null = null;
+  let pendingToolCount = 0;
+
   try {
     for await (const ev of runAgent({
       providerConfig: turnProviderConfig,
@@ -854,6 +875,7 @@ Start by issuing your first batch of web_search calls NOW.`;
           break;
 
         case "stream":
+          if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; } // stop spinner if text streams
           if (ev.text) {
             // Indent each new line to align with prompt text
             const text = ev.text;
@@ -874,9 +896,16 @@ Start by issuing your first batch of web_search calls NOW.`;
         case "tool_call":
           if (currentText) console.log("");
           console.log(ind(`${C("◇")} ${ev.toolTitle}`));
+          pendingToolCount++;
+          // Start spinner if not already running (tools are executing)
+          if (!toolSpinner) {
+            toolSpinner = ora(D(ind(`Running ${ev.toolTitle}...`))).start();
+          }
           break;
 
         case "tool_result":
+          // Stop spinner — tool finished
+          if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
           const icon = ev.toolOk ? G("✓") : R("✗");
           const outLine = (ev.toolOutput ?? "").split("\n")[0].slice(0, 120);
           console.log(ind(`${D("┆")} ${icon} ${D(outLine)}`));
@@ -889,9 +918,16 @@ Start by issuing your first batch of web_search calls NOW.`;
               action: ev.fileChange.action,
             });
           }
+
+          // If more tools pending, restart spinner
+          pendingToolCount--;
+          if (pendingToolCount > 0) {
+            toolSpinner = ora(D(ind(`Running ${pendingToolCount} more tool${pendingToolCount > 1 ? "s" : ""}...`))).start();
+          }
           break;
 
         case "done":
+          if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
           state.totalInputTokens += ev.totalInputTokens ?? 0;
           state.totalOutputTokens += ev.totalOutputTokens ?? 0;
 
@@ -929,6 +965,7 @@ Start by issuing your first batch of web_search calls NOW.`;
           break;
 
         case "error":
+          if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
           if (currentText) console.log("");
           atLineStart = true;
           console.log(ind(R(`Error: ${ev.error}`)));
@@ -936,10 +973,12 @@ Start by issuing your first batch of web_search calls NOW.`;
       }
     }
   } catch (e: any) {
+    if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
     if (currentText) console.log("");
     atLineStart = true;
     console.log(ind(R(`Error: ${e.message}`)));
   } finally {
+    if (toolSpinner) { toolSpinner.stop(); toolSpinner = null; }
     rl.resume();
   }
 }
