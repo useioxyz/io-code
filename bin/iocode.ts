@@ -908,7 +908,8 @@ async function handleCommand(
         `  ${B("▸ Session")}     /model /models /provider /config /key /temp /clear /session /sessions /handoff /export`,
         `  ${B("▸ Context")}    /project /reload /compact /tokens /cost /init`,
         `  ${B("▸ Code")}       /review /plan /todos /agents /lint /undo /checkpoint /restore`,
-        `  ${B("▸ Files")}      /find /workspace /clone`,
+        `  ${B("▸ Files")}      /find /workspace`,
+        `  ${B("▸ Web")}        /search /fetch /clone`,
         `  ${B("▸ Git")}        /diff /status /log /commit`,
         `  ${B("▸ Shell")}      ! cmd   !! cmd  (bang commands)`,
         `  ${B("▸ Meta")}       /help /quit`,
@@ -1560,6 +1561,46 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
     case "/workspace": {
       state.workspaceFiles = await scanWorkspace(state.projectRoot);
       return `\n${D(state.workspaceFiles.map(f => `  ${f}`).join("\n"))}`;
+    }
+
+    // ═══ Web Search ═══
+    case "/search": {
+      if (!arg) return R("Usage: /search <query> — search the web (local Whoogle)");
+
+      const spinner = ora(D(`Searching "${arg.slice(0, 60)}"...`)).start();
+
+      try {
+        const outcome = await executeTool("web_search", { query: arg }, state.projectRoot);
+        spinner.stop();
+
+        if (outcome.ok) {
+          return G(`\n${outcome.output}`);
+        }
+        return R(`  Search failed: ${outcome.output}`);
+      } catch (e: any) {
+        spinner.stop();
+        return R(`  Search failed: ${e.message}`);
+      }
+    }
+
+    // ═══ Web Fetch ═══
+    case "/fetch": {
+      if (!arg) return R("Usage: /fetch <url> — fetch a URL as markdown");
+
+      const spinner = ora(D(`Fetching ${arg.slice(0, 60)}...`)).start();
+
+      try {
+        const outcome = await executeTool("web_fetch", { url: arg }, state.projectRoot);
+        spinner.stop();
+
+        if (outcome.ok) {
+          return G(`\n${outcome.output}`);
+        }
+        return R(`  Fetch failed: ${outcome.output}`);
+      } catch (e: any) {
+        spinner.stop();
+        return R(`  Fetch failed: ${e.message}`);
+      }
     }
 
     // ═══ Clone Website ═══
