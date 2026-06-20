@@ -105,6 +105,7 @@ interface SessionState {
   todos: TodoItem[];
   planMode: boolean;
   pendingReview?: string;
+  deepResearch?: string;
   agents: AgentDef[];
   sessionName?: string;
   /** File change journal — powers /undo */
@@ -552,6 +553,16 @@ async function runRepl(
         rl.close();
         return;
       }
+      // Deep research: fall through to agent run
+      if (state.deepResearch) {
+        const researchTopic = state.deepResearch;
+        state.deepResearch = undefined;
+        console.log(ind(C(`🔬 Deep research: ${researchTopic.slice(0, 80)}`)));
+        await processInput(state, researchTopic, rl);
+        saveLine(input);
+        if (!state.exit) rl.prompt();
+        return;
+      }
       rl.setPrompt(state.planMode ? M("📋 ❯ ") : C("❯ "));
       rl.prompt();
       return;
@@ -733,6 +744,52 @@ async function processInput(
     state.pendingReview = undefined;
   }
 
+  // Deep research mode: inject research methodology directive
+  if (state.deepResearch) {
+    const topic = state.deepResearch;
+    state.deepResearch = undefined;
+    const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+    promptText = `[DEEP RESEARCH MODE] You are conducting deep research on: "${topic}"
+
+Follow this research methodology using your web_search and web_fetch tools:
+
+1. **Query decomposition** — Break the topic into 3-5 search queries covering different aspects (overview, technical details, recent developments, comparisons, criticisms)
+2. **Web search** — Call web_search for each query. Issue multiple searches in parallel.
+3. **Content extraction** — For each search, pick the 2-3 most relevant URLs and call web_fetch to get full content. Fetch multiple URLs in parallel.
+4. **Gap analysis** — After initial research, identify what's missing. Do 2-3 follow-up searches to fill gaps.
+5. **Synthesis** — Compile all findings into a comprehensive research report.
+
+Report format (write to file using write_file):
+\`\`\`
+# Deep Research: ${topic}
+
+## Summary
+(2-3 paragraph executive overview)
+
+## Key Findings
+- Finding 1 [source URL]
+- Finding 2 [source URL]
+- ...
+
+## Detailed Analysis
+### Subtopic 1
+...
+### Subtopic 2
+...
+
+## Sources
+1. [Title](URL)
+2. ...
+
+## Research Gaps
+- What couldn't be found or needs further investigation
+\`\`\`
+
+Save the report to \`research/${slug || "report"}.md\`.
+Be thorough — fetch at least 5-8 sources. Cross-reference claims across sources.
+Start by issuing your first batch of web_search calls NOW.`;
+  }
+
   // ── @agent dispatch ──
   // Detect @agent-name mentions in the prompt, inject the agent's prompt
   // into the system prompt, and override the model for this turn.
@@ -909,7 +966,7 @@ async function handleCommand(
         `  ${B("▸ Context")}    /project /reload /compact /tokens /cost /init`,
         `  ${B("▸ Code")}       /review /plan /todos /agents /lint /undo /checkpoint /restore`,
         `  ${B("▸ Files")}      /find /workspace`,
-        `  ${B("▸ Web")}        /search /fetch /clone`,
+        `  ${B("▸ Web")}        /search /fetch /clone /deep-research`,
         `  ${B("▸ Git")}        /diff /status /log /commit`,
         `  ${B("▸ Shell")}      ! cmd   !! cmd  (bang commands)`,
         `  ${B("▸ Meta")}       /help /quit`,
@@ -1601,6 +1658,13 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
         spinner.stop();
         return R(`  Fetch failed: ${e.message}`);
       }
+    }
+
+    // ═══ Deep Research ═══
+    case "/deep-research": {
+      if (!arg) return R("Usage: /deep-research <topic> — deep research with web search + scraping");
+      state.deepResearch = arg;
+      return null; // signal: fall through to agent run
     }
 
     // ═══ Clone Website ═══
