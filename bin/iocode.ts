@@ -1624,7 +1624,7 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
     case "/search": {
       if (!arg) return R("Usage: /search <query> — search the web (local Whoogle)");
 
-      const spinner = ora(D(`Searching "${arg.slice(0, 60)}"...`)).start();
+      const spinner = ora(D(`🔍 Searching "${arg.slice(0, 60)}"...`)).start();
 
       try {
         const outcome = await executeTool("web_search", { query: arg }, state.projectRoot);
@@ -1644,10 +1644,12 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
     case "/fetch": {
       if (!arg) return R("Usage: /fetch <url> — fetch a URL as markdown");
 
-      const spinner = ora(D(`Fetching ${arg.slice(0, 60)}...`)).start();
+      const spinner = ora(D(`📄 Fetching ${arg.slice(0, 60)}...`)).start();
 
       try {
-        const outcome = await executeTool("web_fetch", { url: arg }, state.projectRoot);
+        const outcome = await executeTool("web_fetch", { url: arg }, state.projectRoot, (msg) => {
+          spinner.text = D(`📄 ${msg}`);
+        });
         spinner.stop();
 
         if (outcome.ok) {
@@ -1674,7 +1676,9 @@ Be concise but thorough. This will be read by a developer continuing the work.`;
       const spinner = ora(D(`Cloning ${arg.slice(0, 50)}...`)).start();
 
       try {
-        const outcome = await executeTool("web_clone", { url: arg }, state.projectRoot);
+        const outcome = await executeTool("web_clone", { url: arg }, state.projectRoot, (msg) => {
+          spinner.text = D(`🌐 ${msg}`);
+        });
         spinner.stop();
 
         if (outcome.ok) {

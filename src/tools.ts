@@ -447,6 +447,7 @@ export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   projectRoot: string,
+  onProgress?: (msg: string) => void,
 ): Promise<ToolOutcome> {
   // Path safety — resolve and ensure within project root
   const safe = (p: string): string => {
@@ -836,6 +837,7 @@ export async function executeTool(
       case "web_fetch": {
         const url = input.url as string;
         try {
+          onProgress?.(`Fetching ${url.slice(0, 60)}...`);
           const resp = await fetch(url, {
             signal: AbortSignal.timeout(15_000),
             headers: {
@@ -877,6 +879,7 @@ export async function executeTool(
 
           // HTML → convert to markdown
           if (contentType.includes("text/html") || contentType.includes("xhtml") || rawText.trimStart().startsWith("<")) {
+            onProgress?.(`Converting HTML→markdown (${(rawText.length / 1024).toFixed(0)}KB)...`);
             const markdown = htmlToMarkdown(rawText);
             const truncated = markdown.length > 12000
               ? markdown.slice(0, 12000) + `\n\n... (${markdown.length - 12000} more chars)`
@@ -960,6 +963,7 @@ export async function executeTool(
         };
 
         // Step 1: Fetch the main HTML
+        onProgress?.(`Fetching ${domain}...`);
         let htmlText: string;
         try {
           const resp = await fetch(url, {
@@ -972,6 +976,7 @@ export async function executeTool(
           return { ok: false, output: `Failed to fetch ${url}: ${e.message}` };
         }
         stats.html++;
+        onProgress?.(`Parsing HTML (${(htmlText.length / 1024).toFixed(0)}KB)...`);
 
         // Step 2: Parse HTML
         const root = parse(htmlText);
@@ -1046,12 +1051,20 @@ export async function executeTool(
 
         // Build URL→localPath map
         const urlMap = new Map<string, string>();
+        const uniqueRefs = refs.filter(r => !urlMap.has(r.url) && (urlMap.set(r.url, ""), true));
+        urlMap.clear();
+
+        const totalAssets = uniqueRefs.length;
+        onProgress?.(`Found ${totalAssets} assets to download`);
 
         // Download all assets (sequential to be polite)
         const results: string[] = [];
-        for (const ref of refs) {
-          if (urlMap.has(ref.url)) continue;
+        let downloaded = 0;
+        for (const ref of uniqueRefs) {
+          const shortName = path.basename(new URL(ref.url).pathname) || ref.url.slice(-30);
+          onProgress?.(`Downloading [${downloaded + 1}/${totalAssets}] ${shortName}`);
           const local = await downloadAsset(ref.url, ref.ext || "");
+          downloaded++;
           if (local) {
             urlMap.set(ref.url, local);
           } else {
@@ -1060,6 +1073,7 @@ export async function executeTool(
         }
 
         // Step 3: Rewrite paths in HTML
+        onProgress?.(`Rewriting paths...`);
         for (const ref of refs) {
           const local = urlMap.get(ref.url);
           if (local) {
@@ -1072,6 +1086,7 @@ export async function executeTool(
         }
 
         // Step 4: Save rewritten HTML
+        onProgress?.(`Saving HTML...`);
         const htmlPath = path.join(outDir, "index.html");
         fs.writeFileSync(htmlPath, root.toString(), "utf-8");
 
