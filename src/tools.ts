@@ -232,6 +232,99 @@ function htmlToMarkdown(html: string): string {
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// ── Framework Detection ──
+// Detects the JS framework from HTML signals.
+
+type Framework = "nextjs" | "nuxt" | "react" | "vue" | "svelte" | "static";
+
+function detectFramework(html: string): Framework {
+  // Next.js: __NEXT_DATA__, _next/, id="__next"
+  if (html.includes("__NEXT_DATA__") || html.includes('id="__next"') || html.includes("/_next/")) return "nextjs";
+  // Nuxt: __NUXT__, _nuxt/, data-n-head
+  if (html.includes("__NUXT__") || html.includes("/_nuxt/") || html.includes("data-n-head")) return "nuxt";
+  // SvelteKit: __sveltekit
+  if (html.includes("__sveltekit") || html.includes("svelte-announcer")) return "svelte";
+  // Vue: id="app" + data-v- attributes
+  if (html.includes('id="app"') || /data-v-[0-9a-f]/.test(html)) return "vue";
+  // React (CRA/Vite): id="root" + react-specific
+  if (html.includes('id="root"') || html.includes("__REACT_DEVTOOLS__")) return "react";
+  return "static";
+}
+
+// ── HTML → JSX Converter ──
+// Converts HTML string to JSX-compatible string.
+// class→className, for→htmlFor, self-closes void elements, converts inline styles.
+
+function htmlToJsx(html: string): string {
+  let jsx = html;
+
+  // Remove script tags entirely (Next.js handles its own)
+  jsx = jsx.replace(/<script\b[^>]*(?:>[\s\S]*?<\/script>|\/>)/gi, "");
+
+  // Remove Next.js hydration data
+  jsx = jsx.replace(/<div id="__next">/gi, "<>");
+  jsx = jsx.replace(/<\/div>\s*<!--.*?-->/g, "</>");
+  jsx = jsx.replace(/<!--[\s\S]*?-->/g, "");
+
+  // self-close void elements
+  jsx = jsx.replace(/<(img|input|br|hr|meta|link|source|area|col|wbr|embed|track|base)([^>]*?)(?<!\/)>/gi, "<$1$2 />");
+
+  // class → className
+  jsx = jsx.replace(/\sclass=/gi, " className=");
+  // for → htmlFor
+  jsx = jsx.replace(/\sfor=/gi, " htmlFor=");
+  // tabindex → tabIndex
+  jsx = jsx.replace(/\stabindex=/gi, " tabIndex=");
+  // colspan → colSpan, rowspan → rowSpan
+  jsx = jsx.replace(/\scolspan=/gi, " colSpan=");
+  jsx = jsx.replace(/\srowspan=/gi, " rowSpan=");
+  // frameborder → frameBorder
+  jsx = jsx.replace(/\sframeborder=/gi, " frameBorder=");
+  // maxlength → maxLength
+  jsx = jsx.replace(/\smaxlength=/gi, " maxLength=");
+  // readonly → readOnly
+  jsx = jsx.replace(/\sreadonly(=?)/gi, (m, eq) => eq ? " readOnly=" : " readOnly");
+  // contenteditable → contentEditable
+  jsx = jsx.replace(/\scontenteditable=/gi, " contentEditable=");
+
+  // autocorrect, autocomplete, autocapitalize
+  jsx = jsx.replace(/\sautocorrect=/gi, " autoCorrect=");
+  jsx = jsx.replace(/\sautocomplete=/gi, " autoComplete=");
+  jsx = jsx.replace(/\sautocapitalize=/gi, " autoCapitalize=");
+
+  // enctype → encType
+  jsx = jsx.replace(/\senctype=/gi, " encType=");
+  // spellcheck → spellCheck
+  jsx = jsx.replace(/\sspellcheck=/gi, " spellCheck=");
+
+  // Remove framework-injected attributes
+  jsx = jsx.replace(/\sdata-reactroot(?:="[^"]*")?/gi, "");
+  jsx = jsx.replace(/\sdata-react-(?:helmet|fiber|internal)[^=]*(?:="[^"]*")?/gi, "");
+  jsx = jsx.replace(/\sdata-v-[0-9a-f]+(?:="[^"]*")?/gi, "");
+  jsx = jsx.replace(/\sdata-n-head(?:="[^"]*")?/gi, "");
+
+  // Convert inline style="color: red; font-size: 14px" → style={{color: 'red', fontSize: '14px'}}
+  jsx = jsx.replace(/\sstyle="([^"]*)"/gi, (match, styleStr: string) => {
+    const pairs = styleStr.split(";").filter(s => s.trim());
+    const cssProps = pairs.map(pair => {
+      const colonIdx = pair.indexOf(":");
+      if (colonIdx === -1) return "";
+      const prop = pair.slice(0, colonIdx).trim();
+      const val = pair.slice(colonIdx + 1).trim();
+      // kebab-case → camelCase
+      const camelProp = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      // Keep quotes for string values, wrap in braces
+      return `${camelProp}: '${val.replace(/'/g, "\\'")}'`;
+    }).filter(Boolean);
+    return ` style={{ ${cssProps.join(", ")} }}`;
+  });
+
+  // Collapse whitespace
+  jsx = jsx.replace(/\n\s*\n/g, "\n").trim();
+
+  return jsx;
+}
+
 // ── Tool Definitions ──
 
 export const TOOL_DEFS: ToolDef[] = [
@@ -380,7 +473,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: "web_clone",
     description:
-      "Clone/download a website locally. Fetches HTML, CSS, JS, images, fonts, and rewrites paths to be local. Saves to ./cloned/<domain>/.",
+      "Clone a website locally with framework detection. Detects Next.js, React, Vue/Nuxt, or static HTML. For Next.js/React: scaffolds a full Next.js project (app router, JSX, package.json, tsconfig). For Vue/Nuxt: scaffolds Vite + Vue project. For static: saves HTML + assets. All assets downloaded to ./cloned/<domain>/.",
     input_schema: {
       type: "object",
       properties: {
@@ -897,6 +990,7 @@ export async function executeTool(
         }
       }
 
+      // ── scaffoldNextJs: generate Next.js project from cloned HTML ──
       case "web_clone": {
         const url = (input.url as string).replace(/\/$/, "");
         const maxDepth = (input.max_depth as number) ?? 1;
@@ -1072,42 +1166,268 @@ export async function executeTool(
           }
         }
 
-        // Step 3: Rewrite paths in HTML
+        // Step 3: Detect framework
+        const framework = detectFramework(htmlText);
+        onProgress?.(`Detected: ${framework.toUpperCase()}`);
+
+        // ═══ Next.js / React → scaffold project ═══
+        if (framework === "nextjs" || framework === "react") {
+          onProgress?.("Scaffolding Next.js project...");
+
+          // Extract metadata from <head>
+          const titleMatch = htmlText.match(/<title[^>]*>(.*?)<\/title>/i);
+          const title = titleMatch?.[1]?.trim() ?? domain;
+          const descMatch = htmlText.match(/<meta\s+name="description"\s+content="([^"]*)"/i);
+          const description = descMatch?.[1] ?? "";
+
+          // Collect CSS: inline <style> tags + downloaded CSS files
+          const cssContents: string[] = [];
+          for (const styleEl of root.querySelectorAll("style")) {
+            cssContents.push(styleEl.text);
+            styleEl.remove();
+          }
+          urlMap.forEach((localPath, origUrl) => {
+            if (localPath.endsWith(".css")) {
+              try {
+                const css = fs.readFileSync(path.join(projectRoot, "cloned", domain, localPath), "utf-8");
+                cssContents.push(`/* ${path.basename(localPath)} */\n${css}`);
+              } catch {}
+            }
+          });
+
+          // Extract body → JSX
+          const bodyEl = root.querySelector("body");
+          let bodyHtml = bodyEl ? bodyEl.innerHTML : root.toString();
+          let bodyJsx = htmlToJsx(bodyHtml);
+          // Rewrite asset paths: assets/xxx → /xxx (Next.js public/)
+          bodyJsx = bodyJsx.replace(/(["'(=])\/?assets\//g, "$1/");
+
+          // Move assets/ → public/
+          const publicDir = path.join(outDir, "public");
+          const oldAssetsDir = path.join(outDir, "assets");
+          if (fs.existsSync(oldAssetsDir)) {
+            fs.mkdirSync(publicDir, { recursive: true });
+            for (const file of fs.readdirSync(oldAssetsDir)) {
+              fs.renameSync(path.join(oldAssetsDir, file), path.join(publicDir, file));
+            }
+            fs.rmSync(oldAssetsDir, { recursive: true });
+          }
+
+          // Create app/ directory
+          const appDir = path.join(outDir, "app");
+          fs.mkdirSync(appDir, { recursive: true });
+
+          // package.json
+          fs.writeFileSync(path.join(outDir, "package.json"), JSON.stringify({
+            name: domain.replace(/\./g, "-"),
+            version: "0.1.0",
+            private: true,
+            scripts: { dev: "next dev", build: "next build", start: "next start", lint: "next lint" },
+            dependencies: { next: "^15.0.0", react: "^19.0.0", "react-dom": "^19.0.0" },
+            devDependencies: { typescript: "^5", "@types/node": "^20", "@types/react": "^19", "@types/react-dom": "^19" },
+          }, null, 2));
+
+          // tsconfig.json
+          fs.writeFileSync(path.join(outDir, "tsconfig.json"), JSON.stringify({
+            compilerOptions: {
+              target: "ES2017", lib: ["dom", "dom.iterable", "esnext"], allowJs: true,
+              skipLibCheck: true, strict: true, noEmit: true, esModuleInterop: true,
+              module: "esnext", moduleResolution: "bundler", resolveJsonModule: true,
+              isolatedModules: true, jsx: "preserve", incremental: true,
+              plugins: [{ name: "next" }], paths: { "@/*": ["./*"] },
+            },
+            include: ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+            exclude: ["node_modules"],
+          }, null, 2));
+
+          // next.config.js
+          fs.writeFileSync(path.join(outDir, "next.config.js"),
+            `/** @type {import('next').NextConfig} */\nconst nextConfig = {};\nmodule.exports = nextConfig;\n`);
+
+          // app/layout.tsx
+          fs.writeFileSync(path.join(appDir, "layout.tsx"),
+            `import type { Metadata } from "next";\nimport "./globals.css";\n\n` +
+            `export const metadata: Metadata = {\n  title: ${JSON.stringify(title)},\n  description: ${JSON.stringify(description)},\n};\n\n` +
+            `export default function RootLayout({\n  children,\n}: Readonly<{ children: React.ReactNode }>) {\n` +
+            `  return (\n    <html lang="en">\n      <body>{children}</body>\n    </html>\n  );\n}\n`);
+
+          // app/page.tsx
+          fs.writeFileSync(path.join(appDir, "page.tsx"),
+            `export default function Home() {\n  return (\n    <>\n${bodyJsx}\n    </>\n  );\n}\n`);
+
+          // app/globals.css
+          fs.writeFileSync(path.join(appDir, "globals.css"), cssContents.join("\n\n") || "/* Add your global styles here */");
+
+          // Clean up: remove old index.html if exists
+          const oldHtml = path.join(outDir, "index.html");
+          if (fs.existsSync(oldHtml)) fs.unlinkSync(oldHtml);
+
+          // Remove JS files (Next.js generates its own)
+          urlMap.forEach((localPath) => {
+            if (localPath.endsWith(".js")) {
+              const jsPath = path.join(projectRoot, "cloned", domain, localPath);
+              if (fs.existsSync(jsPath)) fs.unlinkSync(jsPath);
+            }
+          });
+
+          onProgress?.("Next.js project ready ✓");
+
+          const total = stats.html + stats.css + stats.js + stats.img + stats.font + stats.other;
+          const lines = [
+            `🌐 Cloned ${url} → Next.js project`,
+            ``,
+            `  📦 Framework: ${framework}`,
+            `  📄 ${stats.html} HTML  ·  ${stats.css} CSS  ·  ${stats.js} JS  ·  ${stats.img} images  ·  ${stats.font} fonts  ·  ${stats.other} other`,
+            `  📁 ${outDir}`,
+            ``,
+            `  Structure:`,
+            `    app/layout.tsx    — metadata + root layout`,
+            `    app/page.tsx      — page content as JSX`,
+            `    app/globals.css   — ${cssContents.length} combined styles`,
+            `    public/           — ${urlMap.size} assets`,
+            `    package.json      — next 15 + react 19`,
+            `    tsconfig.json`,
+            ``,
+            `  → cd cloned/${domain} && npm install && npm run dev`,
+          ];
+          if (results.length > 0) {
+            lines.push(``, `  Failed (${results.length}):`, ...results.slice(0, 10));
+            if (results.length > 10) lines.push(`  ... ${results.length - 10} more`);
+          }
+          return { ok: true, output: lines.join("\n") };
+        }
+
+        // ═══ Vue / Nuxt → scaffold Vite + Vue project ═══
+        if (framework === "vue" || framework === "nuxt") {
+          onProgress?.("Scaffolding Vue project...");
+
+          const titleMatch = htmlText.match(/<title[^>]*>(.*?)<\/title>/i);
+          const title = titleMatch?.[1]?.trim() ?? domain;
+
+          // Collect CSS
+          const cssContents: string[] = [];
+          for (const styleEl of root.querySelectorAll("style")) {
+            cssContents.push(styleEl.text);
+            styleEl.remove();
+          }
+          urlMap.forEach((localPath) => {
+            if (localPath.endsWith(".css")) {
+              try {
+                cssContents.push(fs.readFileSync(path.join(projectRoot, "cloned", domain, localPath), "utf-8"));
+              } catch {}
+            }
+          });
+
+          // Extract body → HTML (Vue template)
+          const bodyEl = root.querySelector("body");
+          let bodyHtml = bodyEl ? bodyEl.innerHTML : root.toString();
+          bodyHtml = bodyHtml.replace(/(["'(=])\/?assets\//g, "$1/");
+
+          // Move assets/ → public/
+          const publicDir = path.join(outDir, "public");
+          const oldAssetsDir = path.join(outDir, "assets");
+          if (fs.existsSync(oldAssetsDir)) {
+            fs.mkdirSync(publicDir, { recursive: true });
+            for (const file of fs.readdirSync(oldAssetsDir)) {
+              fs.renameSync(path.join(oldAssetsDir, file), path.join(publicDir, file));
+            }
+            fs.rmSync(oldAssetsDir, { recursive: true });
+          }
+
+          // package.json
+          fs.writeFileSync(path.join(outDir, "package.json"), JSON.stringify({
+            name: domain.replace(/\./g, "-"),
+            version: "0.1.0",
+            private: true,
+            scripts: { dev: "vite", build: "vite build", preview: "vite preview" },
+            dependencies: { vue: "^3.5.0" },
+            devDependencies: { "@vitejs/plugin-vue": "^5", typescript: "^5", vite: "^6", "vue-tsc": "^2" },
+          }, null, 2));
+
+          // vite.config.ts
+          fs.writeFileSync(path.join(outDir, "vite.config.ts"),
+            `import { defineConfig } from "vite";\nimport vue from "@vitejs/plugin-vue";\n\n` +
+            `export default defineConfig({ plugins: [vue()] });\n`);
+
+          // index.html (Vite entry)
+          fs.writeFileSync(path.join(outDir, "index.html"),
+            `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n` +
+            `  <title>${title}</title>\n</head>\n<body>\n  <div id="app"></div>\n  <script type="module" src="/src/main.ts"></script>\n</body>\n</html>\n`);
+
+          // src/main.ts
+          const srcDir = path.join(outDir, "src");
+          fs.mkdirSync(srcDir, { recursive: true });
+          fs.writeFileSync(path.join(srcDir, "main.ts"),
+            `import { createApp } from "vue";\nimport App from "./App.vue";\nimport "./style.css";\n\ncreateApp(App).mount("#app");\n`);
+
+          // src/App.vue
+          fs.writeFileSync(path.join(srcDir, "App.vue"),
+            `<template>\n${bodyHtml}\n</template>\n\n<script setup lang="ts"></script>\n\n` +
+            `<style scoped>\n${cssContents.join("\n\n")}\n</style>\n`);
+
+          // src/style.css
+          fs.writeFileSync(path.join(srcDir, "style.css"), "/* Global styles */\n");
+
+          // tsconfig.json
+          fs.writeFileSync(path.join(outDir, "tsconfig.json"), JSON.stringify({
+            compilerOptions: {
+              target: "ESNext", module: "ESNext", moduleResolution: "bundler",
+              strict: true, jsx: "preserve", skipLibCheck: true,
+              types: ["vite/client"],
+            },
+            include: ["src/**/*.ts", "src/**/*.vue"],
+          }, null, 2));
+
+          onProgress?.("Vue project ready ✓");
+
+          const lines = [
+            `🌐 Cloned ${url} → Vue project`,
+            ``,
+            `  📦 Framework: ${framework}`,
+            `  📁 ${outDir}`,
+            ``,
+            `  Structure:`,
+            `    index.html        — Vite entry`,
+            `    src/App.vue       — page template`,
+            `    src/main.ts       — app mount`,
+            `    public/           — ${urlMap.size} assets`,
+            `    package.json      — vue 3 + vite 6`,
+            ``,
+            `  → cd cloned/${domain} && npm install && npm run dev`,
+          ];
+          return { ok: true, output: lines.join("\n") };
+        }
+
+        // ═══ Static fallback → save HTML (original behavior) ═══
         onProgress?.(`Rewriting paths...`);
         for (const ref of refs) {
           const local = urlMap.get(ref.url);
           if (local) {
             ref.el.setAttribute(ref.attr, local);
-            // Handle srcset rewriting
             if (ref.attr === "srcset") {
               ref.el.setAttribute("srcset", local);
             }
           }
         }
 
-        // Step 4: Save rewritten HTML
         onProgress?.(`Saving HTML...`);
         const htmlPath = path.join(outDir, "index.html");
         fs.writeFileSync(htmlPath, root.toString(), "utf-8");
 
-        // Summary
         const total = stats.html + stats.css + stats.js + stats.img + stats.font + stats.other;
         const lines = [
           `🌐 Cloned ${url}`,
           ``,
+          `  📦 Framework: static HTML`,
           `  📄 ${stats.html} HTML  ·  ${stats.css} CSS  ·  ${stats.js} JS  ·  ${stats.img} images  ·  ${stats.font} fonts  ·  ${stats.other} other`,
           `  📁 ${outDir}`,
           ``,
           `  Total: ${total} files (${refs.length} asset refs, ${urlMap.size} downloaded)`,
         ];
-
         if (results.length > 0) {
-          lines.push(``);
-          lines.push(`  Failed (${results.length}):`);
-          lines.push(...results.slice(0, 10));
+          lines.push(``, `  Failed (${results.length}):`, ...results.slice(0, 10));
           if (results.length > 10) lines.push(`  ... ${results.length - 10} more`);
         }
-
         return { ok: true, output: lines.join("\n") };
       }
 
