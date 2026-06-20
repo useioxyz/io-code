@@ -124,6 +124,114 @@ function execShellAsync(
   });
 }
 
+// ── HTML → Markdown converter ──
+// Strips noise (script/style/nav/footer), converts semantic elements to markdown.
+
+function htmlToMarkdown(html: string): string {
+  const root = parse(html);
+  // Remove non-content elements
+  for (const tag of ["script", "style", "noscript", "svg", "nav", "footer", "header", "iframe"]) {
+    for (const el of root.querySelectorAll(tag)) el.remove();
+  }
+  // Remove common ad/analytics containers
+  for (const el of root.querySelectorAll("[role='banner'], [role='navigation'], [role='contentinfo']")) el.remove();
+
+  const lines: string[] = [];
+  const visited = new WeakSet();
+
+  function processNode(node: any, depth = 0): void {
+    if (!node || visited.has(node)) return;
+    visited.add(node);
+
+    const tag = node.tagName?.toLowerCase();
+    const text = node.textContent?.trim() ?? "";
+
+    // Block-level elements
+    switch (tag) {
+      case "h1": lines.push(`\n# ${text}\n`); return;
+      case "h2": lines.push(`\n## ${text}\n`); return;
+      case "h3": lines.push(`\n### ${text}\n`); return;
+      case "h4": lines.push(`\n#### ${text}\n`); return;
+      case "h5": lines.push(`\n##### ${text}\n`); return;
+      case "h6": lines.push(`\n###### ${text}\n`); return;
+      case "p": if (text) lines.push(`\n${text}\n`); return;
+      case "br": lines.push(""); return;
+      case "hr": lines.push("\n---\n"); return;
+      case "blockquote": lines.push(`\n> ${text}\n`); return;
+      case "pre": {
+        const code = node.querySelector("code");
+        const lang = code?.getAttribute("class")?.match(/language-(\w+)/)?.[1] ?? "";
+        lines.push(`\n\`\`\`${lang}\n${code?.textContent ?? text}\n\`\`\`\n`);
+        return;
+      }
+      case "code": {
+        // Inline code if inside <p>, block if inside <pre> (handled above)
+        const parent = node.parentNode;
+        if (parent && parent.tagName?.toLowerCase() === "pre") return; // already handled
+        lines.push(`\`${text}\``);
+        return;
+      }
+      case "ul": case "ol": {
+        lines.push("");
+        for (let i = 0; i < node.childNodes.length; i++) {
+          const child = node.childNodes[i];
+          if (child.tagName?.toLowerCase() === "li") {
+            const prefix = tag === "ol" ? `${i + 1}. ` : "- ";
+            lines.push(`${prefix}${child.textContent?.trim() ?? ""}`);
+          }
+        }
+        lines.push("");
+        return;
+      }
+      case "table": {
+        const rows = node.querySelectorAll("tr");
+        if (rows.length === 0) return;
+        const headers = rows[0].querySelectorAll("th,td");
+        const headerCells = headers.map((c: any) => c.textContent?.trim() ?? "");
+        lines.push(`\n| ${headerCells.join(" | ")} |`);
+        lines.push(`| ${headerCells.map(() => "---").join(" | ")} |`);
+        for (let r = 1; r < rows.length; r++) {
+          const cells = rows[r].querySelectorAll("th,td");
+          lines.push(`| ${cells.map((c: any) => c.textContent?.trim() ?? "").join(" | ")} |`);
+        }
+        lines.push("");
+        return;
+      }
+      case "a": {
+        const href = node.getAttribute("href") ?? "";
+        if (text && href && !href.startsWith("#")) {
+          lines.push(`[${text}](${href})`);
+        } else if (text) {
+          lines.push(text);
+        }
+        return;
+      }
+      case "img": {
+        const src = node.getAttribute("src") ?? "";
+        const alt = node.getAttribute("alt") ?? "";
+        if (src) lines.push(`![${alt}](${src})`);
+        return;
+      }
+    }
+
+    // For text nodes and unknown elements, recurse into children
+    if (node.childNodes && node.childNodes.length > 0) {
+      for (const child of node.childNodes) {
+        processNode(child, depth + 1);
+      }
+    }
+  }
+
+  // Process top-level children of <body> or root
+  const body = root.querySelector("body") ?? root;
+  for (const child of body.childNodes) {
+    processNode(child);
+  }
+
+  // Clean up: collapse 3+ blank lines to 2, trim
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 // ── Tool Definitions ──
 
 export const TOOL_DEFS: ToolDef[] = [
@@ -249,7 +357,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: "web_search",
-    description: "Search the web for current docs, APIs, versions. Returns title+URL+snippet.",
+    description: "Search the web via local Whoogle instance (privacy-preserving, no tracking). Returns title+URL+snippet.",
     input_schema: {
       type: "object",
       properties: {
@@ -260,11 +368,11 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: "web_fetch",
-    description: "Fetch content from a URL as markdown text.",
+    description: "Fetch a URL and convert HTML to markdown. Returns clean text with headings, links, lists, and code blocks. Handles JSON and plain text too.",
     input_schema: {
       type: "object",
       properties: {
-        url: { type: "string", description: "URL to fetch" },
+        url: { type: "string", description: "URL to fetch (http/https)" },
       },
       required: ["url"],
     },
@@ -730,7 +838,11 @@ export async function executeTool(
         try {
           const resp = await fetch(url, {
             signal: AbortSignal.timeout(15_000),
-            headers: { "User-Agent": "IO-Code/0.1.0" },
+            headers: {
+              "User-Agent": "Mozilla/5.0 (compatible; IO-Code/0.2.0)",
+              "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
+            },
+            redirect: "follow",
           });
 
           if (!resp.ok) {
@@ -738,16 +850,45 @@ export async function executeTool(
           }
 
           const contentType = resp.headers.get("content-type") ?? "";
-          const text = await resp.text();
+          const rawText = await resp.text();
+          const finalUrl = resp.url; // follows redirects
 
-          if (text.length > 100_000) {
-            return {
-              ok: true,
-              output: `📄 ${url} (${(text.length / 1000).toFixed(0)}KB, truncated)\n\n${text.slice(0, 5000)}\n\n... (${text.length - 5000} more chars)`,
-            };
+          // JSON → return as-is (pretty-printed)
+          if (contentType.includes("application/json")) {
+            try {
+              const parsed = JSON.parse(rawText);
+              const pretty = JSON.stringify(parsed, null, 2);
+              const truncated = pretty.length > 12000
+                ? pretty.slice(0, 12000) + `\n\n... (${pretty.length - 12000} more chars)`
+                : pretty;
+              return { ok: true, output: `📄 ${finalUrl} (JSON)\n\n\`\`\`json\n${truncated}\n\`\`\`` };
+            } catch {
+              return { ok: true, output: `📄 ${finalUrl} (JSON, raw)\n\n${rawText.slice(0, 8000)}` };
+            }
           }
 
-          return { ok: true, output: `📄 ${url}\n\n${text.slice(0, 8000)}` };
+          // Plain text → return as-is
+          if (contentType.startsWith("text/plain")) {
+            const truncated = rawText.length > 12000
+              ? rawText.slice(0, 12000) + `\n\n... (${rawText.length - 12000} more chars)`
+              : rawText;
+            return { ok: true, output: `📄 ${finalUrl} (text)\n\n${truncated}` };
+          }
+
+          // HTML → convert to markdown
+          if (contentType.includes("text/html") || contentType.includes("xhtml") || rawText.trimStart().startsWith("<")) {
+            const markdown = htmlToMarkdown(rawText);
+            const truncated = markdown.length > 12000
+              ? markdown.slice(0, 12000) + `\n\n... (${markdown.length - 12000} more chars)`
+              : markdown;
+            const titleMatch = rawText.match(/<title[^>]*>(.*?)<\/title>/i);
+            const title = titleMatch?.[1]?.trim() ?? "";
+            const header = title ? `📄 ${title}\n   ${finalUrl}\n` : `📄 ${finalUrl}\n`;
+            return { ok: true, output: `${header}\n${truncated}` };
+          }
+
+          // Fallback: return raw text
+          return { ok: true, output: `📄 ${finalUrl} (${contentType})\n\n${rawText.slice(0, 8000)}` };
         } catch (e: any) {
           return { ok: false, output: `Failed to fetch ${url}: ${e.message}` };
         }
